@@ -47,69 +47,110 @@ usable from a terminal or keybinding without the widget.
 ```
 manifest.json          Omarchy plugin manifest (id: potato.omadev, kind: bar-widget)
 Widget.qml             bar icon + popup panel; calls the CLI, renders its JSON
-components/            small QML pieces used by Widget.qml
 bin/omadev             executable entry point (python3, no build step)
-omadev_cli/            the CLI package: config, checks, steps, runner, output
-tests/                 unittest suites for the CLI (run: python3 -m unittest)
+omadev_cli/
+  config.py            projects file: dataclasses, validation, atomic save
+  system.py            Runner (subprocess without a shell, always a timeout), ports, /proc
+  hypr.py              hyprctl clients, window matching, focus, pid -> window
+  herdr.py             herdr CLI wrapper: workspaces, tabs, panes, foreground process
+  tmux.py              tmux wrapper with the same shape
+  steps.py             the Start flow: check-then-act steps, dry run, status snapshot
+  cli.py               argparse, JSON/text output, logging
+tests/                 unittest suites; tests/fakes.py holds the fake Runner and Services
 scripts/dev-install    rsync the repo into ~/.config/omarchy/plugins/potato.omadev/
 ```
 
 ### The CLI (`bin/omadev`)
 
+Implemented:
+
 - `omadev list --json` — projects with their configured fields.
-- `omadev status [<project>] --json` — live state per project: multiplexer
-  workspace present, port listening, browser/editor/app windows present.
-  Runs the checks once and exits. Nothing polls.
-- `omadev start <project> [--json]` — runs the start steps in order.
+- `omadev validate` — checks the projects file, including that paths exist.
+- `omadev status [<project>] --json` — read-only snapshot: workspace present,
+  ports listening, URL reachable, editor and app windows open. Runs once.
+- `omadev start <project> [--dry-run] [--json]` — runs the start steps.
+  `--dry-run` reads state but changes nothing; actions report `planned`.
+
+Planned:
+
 - `omadev stop <project> [--json]` — runs the stop steps in reverse.
 - `omadev add|edit|remove <project> ...` — edits the projects file; the widget's
   form calls these instead of writing JSON itself.
-- `omadev validate` — checks the projects file and reports problems.
 
 Every step is **check, then act**, and reports one of `skipped`, `started`,
-`focused`, `stopped`, `failed` with a short reason. Output is human text by
-default and one JSON document with `--json`. Exit code 0 only when every step
-succeeded or was skipped.
+`focused`, `planned`, `failed` (later `stopped`) with a short reason. Details
+are written in the imperative ("create tab …"); the status carries the tense.
+Output is human text by default and one JSON document with `--json`. Exit code
+0 only when no step failed.
 
-Start order (sequential is the default; `mode: "parallel"` runs the
-independent tail steps together):
+Start order for a sequential project (`mode: "parallel"` opens the editor and
+apps before waiting for the URL):
 
-1. multiplexer workspace or session for the project path (herdr or tmux)
-2. commands, each in its own pane or window, only if their port is not listening
-3. wait for the project URL's port to accept connections (bounded timeout)
-4. browser at the URL (`webapp` window or tab in the existing browser)
-5. editor on the project path
-6. extra apps
+1. `workspace` — herdr workspace or tmux session for the project path. If the
+   herdr server is down, a terminal running `herdr` is opened first (`herdr` step).
+2. `command:<name>` — each command in its own tab (herdr) or window (tmux)
+   named `omadev-<name>`, only if its port is not already listening and the
+   pane is an idle shell. A busy pane is never typed into.
+3. `terminal` — focus the terminal window hosting the multiplexer client,
+   found by walking the client's parent pids to a Hyprland window; else open
+   one. `terminal:focus` then shows the project's workspace in herdr.
+4. `wait` — wait for the URL's port to accept connections (`wait_timeout`).
+5. `browser` — `webapp`: focus the app window by class, else launch.
+   `browser`: `xdg-open`, only when the server was not already up before this run.
+6. `editor` — focus a window matching the editor's class whose title contains
+   the project folder name as a whole word; else launch.
+7. `app:<name>` — focus a window matching `match`; else launch.
 
-Stop order: send Ctrl-C to command panes and wait for their ports to close,
-run declared `stop_commands` (for example `docker compose down`), close the
-windows Start opened or focused, then close the workspace or session.
+Stop order (planned): send Ctrl-C to command panes and wait for their ports to
+close, run declared `stop_commands` (for example `docker compose down`), close
+the windows Start opened or focused, then close the workspace or session.
 
 ### Idempotency checks and their sources
 
 | What | How it is checked | How it is acted on |
 |------|-------------------|--------------------|
-| herdr workspace | `herdr workspace list` JSON, match on `label` | `herdr workspace create --cwd --label`, `herdr pane run` |
-| tmux session | `tmux has-session -t` | `tmux new-session -d`, `tmux send-keys` |
-| dev server | TCP connect to the URL's host and port | run the command in a pane |
-| browser (webapp) | `hyprctl clients -j`, match window class | `omarchy-launch-webapp`, else `hyprctl dispatch focuswindow` |
+| herdr workspace | `herdr workspace list` JSON, match on `label` | `herdr workspace create --cwd --label --no-focus` |
+| herdr command | `herdr tab list` for `omadev-<name>`; `herdr pane process-info` for an idle shell | `herdr tab create`, `herdr pane run` |
+| tmux session | `tmux has-session -t =name` | `tmux new-session -d` |
+| tmux command | `tmux list-windows` for `omadev-<name>`; `#{pane_current_command}` is a shell | `tmux new-window`, `tmux send-keys -l` + `Enter` |
+| dev server | TCP connect to `localhost:<port>` | run the command in its tab |
+| terminal | multiplexer client pid → parent pids → `hyprctl clients` pid | `hyprctl dispatch focuswindow`, else `omarchy-launch-terminal` |
+| browser (webapp) | window class contains the URL host (Chromium app windows do) | `omarchy-launch-webapp`, else focus |
 | browser (tab) | not detectable; opened only when the server was not already up | `xdg-open` |
-| editor, apps | `hyprctl clients -j`, match class or title | `omarchy-launch-or-focus` or `uwsm-app` |
+| editor | class matches `editor.match` and title has the folder name as a word | focus, else launch (`uwsm-app --` unless an `omarchy-*` launcher) |
+| apps | `match` regex over class and title | focus, else launch |
 
-Prefer the `omarchy-launch-*` commands over reimplementing them; they already
-encode how Omarchy launches terminals, TUIs, web apps and editors.
+The port check cannot tell whose server is listening; one project per port is
+assumed. Prefer the `omarchy-launch-*` commands over reimplementing them; they
+already encode how Omarchy launches terminals, TUIs, web apps and editors.
 
 ### Configuration
 
 Projects live outside the plugin directory so a plugin update never touches
-them: `~/.config/omadev/projects.json`, with a top-level `"version": 1`.
-State and logs live in `~/.local/state/omadev/`. Per-widget display options
-(popup width and similar) live inline in `shell.json` like every Omarchy widget.
+them: `~/.config/omadev/projects.json`, with a top-level `"version": 1` and an
+optional `default_browser`. State and logs live in `~/.local/state/omadev/`
+(`omadev.log`, size-rotated). Per-widget display options (popup width and
+similar) live inline in `shell.json` like every Omarchy widget.
 
-Per project: `name`, `path`, `multiplexer` (`herdr` | `tmux`), `session`
-(workspace label or tmux session name), `commands` (list of `{name, run, port}`),
-`url`, `browser` (`webapp` | `browser`, overriding the global default),
-`editor`, `apps` (list of `{name, launch, match}`), `stop_commands`, `mode`.
+Per project:
+
+| Field | Meaning |
+|-------|---------|
+| `name` | unique; letters, digits, space, `. _ -`, up to 64 chars |
+| `path` | project directory, `~` allowed |
+| `multiplexer` | `herdr` (default) or `tmux` |
+| `session` | workspace label or tmux session name; defaults to `name` |
+| `commands` | list of `{name, run, port?, cwd?}`; `cwd` is relative, inside the project |
+| `url` | http(s) URL to wait for and open |
+| `browser` | `webapp` or `browser`; overrides `default_browser` |
+| `editor` | `{launch: argv, match?: class regex}`; default is `omarchy-launch-editor {path}` |
+| `apps` | list of `{name, launch: argv, match: regex}` |
+| `stop_commands` | commands run on Stop (planned) |
+| `mode` | `sequential` (default) or `parallel` |
+| `wait_timeout` | seconds to wait for the URL, default 90 |
+
+`launch` and `match` strings may use `{path}` and `{name}`; substitution is
+plain replacement so regex braces survive.
 
 ### The widget (`Widget.qml`)
 
@@ -170,12 +211,18 @@ detected at run time; the widget names what is missing.
 ## Development workflow
 
 ```bash
-python3 -m unittest discover -s tests      # CLI tests
+python3 -m unittest discover -s tests -t . # CLI tests (fakes, no real herdr/tmux/hyprctl)
 python3 -m compileall -q omadev_cli bin    # syntax check
 omarchy plugin validate .                  # manifest check
+bin/omadev start <project> --dry-run --file <path>   # rehearse against the live system, read-only
 scripts/dev-install                        # copy into the live plugin dir; the shell hot-reloads
 journalctl --user -u omarchy-shell -f      # or: omarchy-shell shell rescanPlugins
 ```
+
+Tests never touch real herdr, tmux or Hyprland: `tests/fakes.py` provides a
+`FakeRunner` that answers registered argv prefixes and fails loudly on any
+unexpected command, plus `FakeServices` with knobs for ports, windows and
+processes. Add a test for every new step or check.
 
 The plugin directory must not contain symlinks (the validator rejects them),
 so development copies files in rather than linking the repo.

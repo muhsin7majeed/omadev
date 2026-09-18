@@ -32,20 +32,24 @@ class ParseTests(unittest.TestCase):
             self.dir,
             multiplexer="tmux",
             session="demo-sess",
-            commands=[{"name": "web", "run": "npm run dev", "port": 3000}],
+            commands=[{"name": "web", "run": "npm run dev", "port": 3000, "cwd": "client"}],
             url="http://localhost:3000",
             browser="browser",
-            editor=["zed"],
+            editor={"launch": ["zed", "{path}"], "match": r"^dev\.zed\.Zed$"},
             apps=[{"name": "lazydocker", "launch": ["omarchy-launch-tui", "lazydocker"], "match": "lazydocker"}],
             stop_commands=["docker compose down"],
             mode="parallel",
+            wait_timeout=30,
         )
         config = self.parse(data)
         project = config.projects[0]
         self.assertEqual(project.session_name, "demo-sess")
         self.assertEqual(project.commands[0].port, 3000)
+        self.assertEqual(project.commands[0].cwd, "client")
         self.assertEqual(project.url_port, 3000)
+        self.assertEqual(project.wait_timeout, 30)
         self.assertEqual(config.browser_for(project), "browser")
+        self.assertEqual(project.effective_editor.match, r"^dev\.zed\.Zed$")
         self.assertEqual(project.apps[0].launch, ("omarchy-launch-tui", "lazydocker"))
         self.assertEqual(cfg.parse(cfg.to_dict(config)), config)
 
@@ -54,8 +58,33 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(project.multiplexer, "herdr")
         self.assertEqual(project.session_name, "demo")
         self.assertEqual(project.mode, "sequential")
+        self.assertEqual(project.wait_timeout, cfg.DEFAULT_WAIT_TIMEOUT)
         self.assertIsNone(project.url_port)
+        self.assertEqual(project.effective_editor, cfg.DEFAULT_EDITOR)
         self.assertEqual(self.parse(minimal(self.dir)).browser_for(project), "webapp")
+
+    def test_command_cwd_must_stay_inside_project(self) -> None:
+        for cwd in ("/etc", "../other", "a/../../b"):
+            with self.subTest(cwd=cwd), self.assertRaises(cfg.ConfigError) as ctx:
+                self.parse(minimal(self.dir, commands=[{"name": "web", "run": "x", "cwd": cwd}]))
+            self.assertEqual(ctx.exception.where, "project 'demo'.commands[0].cwd")
+
+    def test_duplicate_command_names(self) -> None:
+        with self.assertRaises(cfg.ConfigError):
+            self.parse(minimal(self.dir, commands=[{"name": "a", "run": "x"}, {"name": "a", "run": "y"}]))
+
+    def test_editor_needs_launch_and_valid_match(self) -> None:
+        with self.assertRaises(cfg.ConfigError):
+            self.parse(minimal(self.dir, editor={"match": "x"}))
+        with self.assertRaises(cfg.ConfigError):
+            self.parse(minimal(self.dir, editor={"launch": ["zed"], "match": "("}))
+        with self.assertRaises(cfg.ConfigError):
+            self.parse(minimal(self.dir, editor=["zed"]))
+
+    def test_wait_timeout_bounds(self) -> None:
+        for value in (0, 3601, "30", True):
+            with self.subTest(value=value), self.assertRaises(cfg.ConfigError):
+                self.parse(minimal(self.dir, wait_timeout=value))
 
     def test_url_port_defaults_by_scheme(self) -> None:
         self.assertEqual(cfg.url_port("http://localhost"), 80)

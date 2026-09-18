@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 
 from omadev_cli import cli
+from tests.fakes import FakeServices
 
 
 class CliTests(unittest.TestCase):
@@ -19,10 +20,48 @@ class CliTests(unittest.TestCase):
         self.dir = Path(self.tmp.name)
         self.file = self.dir / "projects.json"
 
-    def run_cli(self, *argv: str) -> tuple[int, str, str]:
+    def run_cli(self, *argv: str, services: FakeServices | None = None) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
-        code = cli.main(list(argv), out=out, err=err)
+        factory = (services or FakeServices()).build
+        code = cli.main(list(argv), out=out, err=err, services_factory=factory, logging_enabled=False)
         return code, out.getvalue(), err.getvalue()
+
+    def test_start_dry_run_json(self) -> None:
+        fake = FakeServices()
+        fake.runner.on_json("herdr", "workspace", "list", result={"workspaces": []})
+        self.write({"version": 1, "projects": [{"name": "demo", "path": str(self.dir), "url": "http://localhost:3000",
+                                                "commands": [{"name": "app", "run": "npm run dev", "port": 3000}]}]})
+        code, out, _ = self.run_cli("start", "demo", "--dry-run", "--json", "--file", str(self.file), services=fake)
+        self.assertEqual(code, 0)
+        result = json.loads(out)
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["dry_run"])
+        self.assertEqual({s["status"] for s in result["steps"]}, {"planned"})
+        self.assertEqual(fake.runner.detached, [])
+
+    def test_start_unknown_project(self) -> None:
+        self.write({"version": 1, "projects": [{"name": "demo", "path": str(self.dir)}]})
+        code, out, _ = self.run_cli("start", "nope", "--json", "--file", str(self.file))
+        self.assertEqual(code, 1)
+        self.assertIn("unknown project 'nope'", json.loads(out)["error"])
+
+    def test_start_text_output_and_failure_exit(self) -> None:
+        fake = FakeServices()
+        fake.runner.tools.discard("herdr")
+        self.write({"version": 1, "projects": [{"name": "demo", "path": str(self.dir)}]})
+        code, out, err = self.run_cli("start", "demo", "--file", str(self.file), services=fake)
+        self.assertEqual(code, 1)
+        self.assertIn("failed", out)
+        self.assertIn("herdr is not installed", out)
+        self.assertIn("omadev: failed: workspace", err)
+
+    def test_status_json(self) -> None:
+        fake = FakeServices()
+        fake.runner.on_json("herdr", "workspace", "list", result={"workspaces": []})
+        self.write({"version": 1, "projects": [{"name": "demo", "path": str(self.dir)}]})
+        code, out, _ = self.run_cli("status", "--json", "--file", str(self.file), services=fake)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["projects"][0]["workspace"]["present"], False)
 
     def write(self, data: object) -> None:
         self.file.write_text(json.dumps(data), encoding="utf-8")

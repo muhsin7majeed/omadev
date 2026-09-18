@@ -24,23 +24,32 @@ MULTIPLEXERS = ("herdr", "tmux")
 BROWSER_MODES = ("webapp", "browser")
 MODES = ("sequential", "parallel")
 MAX_PORT = 65535
+DEFAULT_WAIT_TIMEOUT = 90
+MAX_WAIT_TIMEOUT = 3600
 
-# Project names become multiplexer labels, window-match patterns and log
-# lines, so they are kept to a short, readable alphabet.
+# Project and command names become multiplexer labels, window-match patterns
+# and log lines, so they are kept to a short, readable alphabet.
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$")
 
 _PROJECT_FIELDS = frozenset({
     "name", "path", "multiplexer", "session", "commands", "url", "browser",
-    "editor", "apps", "stop_commands", "mode",
+    "editor", "apps", "stop_commands", "mode", "wait_timeout",
 })
-_COMMAND_FIELDS = frozenset({"name", "run", "port"})
+_COMMAND_FIELDS = frozenset({"name", "run", "port", "cwd"})
 _APP_FIELDS = frozenset({"name", "launch", "match"})
+_EDITOR_FIELDS = frozenset({"launch", "match"})
 _CONFIG_FIELDS = frozenset({"version", "default_browser", "projects"})
 
 
 def config_dir() -> Path:
     """Directory holding user configuration, honouring XDG_CONFIG_HOME."""
     base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "omadev"
+
+
+def state_dir() -> Path:
+    """Directory for logs and run state, honouring XDG_STATE_HOME."""
+    base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
     return Path(base) / "omadev"
 
 
@@ -64,12 +73,14 @@ class Command:
 
     `port` is the port the command listens on. When set, Start skips the
     command if something already listens there and Stop waits for it to
-    close. When unset, the command is always sent on Start.
+    close. When unset, the command is always sent on Start. `cwd` is
+    relative to the project path; the pane is opened there.
     """
 
     name: str
     run: str
     port: int | None = None
+    cwd: str | None = None
 
 
 @dataclass(frozen=True)
@@ -78,11 +89,29 @@ class App:
 
     `launch` is an argv list. `match` is a regular expression tested against
     the Hyprland window class and title to find an already open instance.
+    Both may use the placeholders {path} and {name}.
     """
 
     name: str
     launch: tuple[str, ...]
     match: str
+
+
+@dataclass(frozen=True)
+class Editor:
+    """How to open the project in an editor.
+
+    `launch` is an argv list; `match` is a regular expression tested against
+    the window class of an already open editor window. When `match` is unset
+    the editor is launched every time and is trusted to reuse its own window,
+    which Zed, VS Code and Cursor all do for an already open folder.
+    """
+
+    launch: tuple[str, ...]
+    match: str | None = None
+
+
+DEFAULT_EDITOR = Editor(launch=("omarchy-launch-editor", "{path}"))
 
 
 @dataclass(frozen=True)
@@ -94,15 +123,20 @@ class Project:
     commands: tuple[Command, ...] = ()
     url: str | None = None
     browser: str | None = None
-    editor: tuple[str, ...] | None = None
+    editor: Editor | None = None
     apps: tuple[App, ...] = ()
     stop_commands: tuple[str, ...] = ()
     mode: str = "sequential"
+    wait_timeout: int = DEFAULT_WAIT_TIMEOUT
 
     @property
     def session_name(self) -> str:
         """Multiplexer workspace label or tmux session name."""
         return self.session or self.name
+
+    @property
+    def effective_editor(self) -> Editor:
+        return self.editor or DEFAULT_EDITOR
 
     @property
     def url_port(self) -> int | None:
@@ -199,17 +233,42 @@ def _warn_unknown(raw: dict[str, Any], known: frozenset[str], where: str, warnin
         warnings.append(f"{where}: unknown field '{key}' ignored")
 
 
+def _relative_dir(value: Any, where: str) -> str:
+    text = _string(value, where)
+    path = Path(text)
+    if path.is_absolute() or ".." in path.parts:
+        raise ConfigError(where, "must be a relative path inside the project, without '..'")
+    return text
+
+
 def _parse_command(raw: Any, where: str, warnings: list[str]) -> Command:
     data = _expect(raw, where, dict, "an object")
     _warn_unknown(data, _COMMAND_FIELDS, where, warnings)
     if "name" not in data or "run" not in data:
         raise ConfigError(where, "needs 'name' and 'run'")
+    name = _string(data["name"], f"{where}.name")
+    if not NAME_PATTERN.match(name):
+        raise ConfigError(f"{where}.name", "may use letters, digits, space, dot, underscore and dash, up to 64 characters")
     port = data.get("port")
+    cwd = data.get("cwd")
     return Command(
-        name=_string(data["name"], f"{where}.name"),
+        name=name,
         run=_string(data["run"], f"{where}.run"),
         port=None if port is None else _port(port, f"{where}.port"),
+        cwd=None if cwd is None else _relative_dir(cwd, f"{where}.cwd"),
     )
+
+
+def _parse_editor(raw: Any, where: str, warnings: list[str]) -> Editor:
+    data = _expect(raw, where, dict, "an object")
+    _warn_unknown(data, _EDITOR_FIELDS, where, warnings)
+    if "launch" not in data:
+        raise ConfigError(where, "needs 'launch'")
+    launch = _string_list(data["launch"], f"{where}.launch")
+    if not launch:
+        raise ConfigError(f"{where}.launch", "must not be empty")
+    match = data.get("match")
+    return Editor(launch=launch, match=None if match is None else _regex(match, f"{where}.match"))
 
 
 def _parse_app(raw: Any, where: str, warnings: list[str]) -> App:
@@ -252,10 +311,20 @@ def _parse_project(raw: Any, where: str, warnings: list[str], *, check_paths: bo
         _parse_command(item, f"{where}.commands[{i}]", warnings)
         for i, item in enumerate(_expect(data.get("commands", []), f"{where}.commands", list, "a list"))
     )
+    seen_commands: set[str] = set()
+    for command in commands:
+        if command.name in seen_commands:
+            raise ConfigError(f"{where}.commands", f"duplicate command name '{command.name}'")
+        seen_commands.add(command.name)
+
     apps = tuple(
         _parse_app(item, f"{where}.apps[{i}]", warnings)
         for i, item in enumerate(_expect(data.get("apps", []), f"{where}.apps", list, "a list"))
     )
+
+    wait_timeout = _expect(data.get("wait_timeout", DEFAULT_WAIT_TIMEOUT), f"{where}.wait_timeout", int, "an integer")
+    if not 1 <= wait_timeout <= MAX_WAIT_TIMEOUT:
+        raise ConfigError(f"{where}.wait_timeout", f"must be between 1 and {MAX_WAIT_TIMEOUT} seconds")
 
     return Project(
         name=name,
@@ -265,10 +334,11 @@ def _parse_project(raw: Any, where: str, warnings: list[str], *, check_paths: bo
         commands=commands,
         url=None if url is None else _url(url, f"{where}.url"),
         browser=None if browser is None else _choice(browser, f"{where}.browser", BROWSER_MODES),
-        editor=None if editor is None else _string_list(editor, f"{where}.editor") or None,
+        editor=None if editor is None else _parse_editor(editor, f"{where}.editor", warnings),
         apps=apps,
         stop_commands=_string_list(data.get("stop_commands", []), f"{where}.stop_commands"),
         mode=_choice(data.get("mode", "sequential"), f"{where}.mode", MODES),
+        wait_timeout=wait_timeout,
     )
 
 
@@ -329,10 +399,18 @@ def to_dict(config: Config) -> dict[str, Any]:
         data: dict[str, Any] = {"name": item.name, "run": item.run}
         if item.port is not None:
             data["port"] = item.port
+        if item.cwd is not None:
+            data["cwd"] = item.cwd
         return data
 
     def app(item: App) -> dict[str, Any]:
         return {"name": item.name, "launch": list(item.launch), "match": item.match}
+
+    def editor(item: Editor) -> dict[str, Any]:
+        data: dict[str, Any] = {"launch": list(item.launch)}
+        if item.match is not None:
+            data["match"] = item.match
+        return data
 
     def project(item: Project) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -341,6 +419,8 @@ def to_dict(config: Config) -> dict[str, Any]:
             "multiplexer": item.multiplexer,
             "mode": item.mode,
         }
+        if item.wait_timeout != DEFAULT_WAIT_TIMEOUT:
+            data["wait_timeout"] = item.wait_timeout
         if item.session is not None:
             data["session"] = item.session
         if item.commands:
@@ -350,7 +430,7 @@ def to_dict(config: Config) -> dict[str, Any]:
         if item.browser is not None:
             data["browser"] = item.browser
         if item.editor is not None:
-            data["editor"] = list(item.editor)
+            data["editor"] = editor(item.editor)
         if item.apps:
             data["apps"] = [app(a) for a in item.apps]
         if item.stop_commands:

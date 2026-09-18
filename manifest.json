@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "id": "potato.omadev",
+  "name": "omadev",
+  "version": "0.1.0",
+  "author": "Muhsin",
+  "license": "MIT",
+  "description": "Start and stop whole development projects from the bar: multiplexer workspace, dev server, browser, editor and helper apps, without duplicating anything already running.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "Widget.qml"
+  },
+  "barWidget": {
+    "displayName": "omadev",
+    "description": "One click starts a project's multiplexer workspace, dev server, browser, editor and helper apps; one click stops them. Start attaches to whatever is already running instead of opening it twice.",
+    "category": "Development",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "panelWidth": 380
+    },
+    "schema": [
+      {
+        "key": "panelWidth",
+        "type": "integer",
+        "label": "Panel width",
+        "min": 300,
+        "max": 800,
+        "step": 20,
+        "defaultValue": 380,
+        "description": "In the shell's spacing units. Anything wider than the screen is trimmed to fit."
+      }
+    ]
+  }
+}

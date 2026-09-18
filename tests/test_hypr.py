@@ -33,10 +33,30 @@ class ClientsTests(unittest.TestCase):
         with self.assertRaises(hypr.HyprError):
             hypr.clients(runner)
 
-    def test_focus_dispatches_by_address(self) -> None:
-        runner = FakeRunner().on("hyprctl", "dispatch")
+    def test_focus_uses_lua_dispatch_first(self) -> None:
+        runner = FakeRunner().on("hyprctl", "dispatch", stdout="ok\n")
+        hypr.focus(runner, window(address="0xa"))
+        self.assertEqual(runner.calls, [("hyprctl", "dispatch", 'hl.dsp.focus({ window = "address:0xa" })')])
+
+    def test_focus_falls_back_to_classic_dispatch(self) -> None:
+        runner = FakeRunner()
+        runner.on("hyprctl", "dispatch", "focuswindow", stdout="ok\n")
+        runner.on("hyprctl", "dispatch", 'hl.dsp.focus({ window = "address:0xa" })', returncode=7, stderr="error: unknown")
         hypr.focus(runner, window(address="0xa"))
         self.assertEqual(runner.calls[-1], ("hyprctl", "dispatch", "focuswindow", "address:0xa"))
+
+    def test_focus_raises_when_both_forms_fail(self) -> None:
+        # Hyprland reports some dispatch errors with exit 0 and a message
+        # instead of "ok", so the output is checked too.
+        runner = FakeRunner().on("hyprctl", "dispatch", stdout="Invalid dispatcher\n")
+        with self.assertRaises(hypr.HyprError):
+            hypr.focus(runner, window(address="0xa"))
+        self.assertEqual(len(runner.calls), 2)
+
+    def test_close_dispatch_forms(self) -> None:
+        runner = FakeRunner().on("hyprctl", "dispatch", stdout="ok\n")
+        hypr.close(runner, window(address="0xb"))
+        self.assertEqual(runner.calls[-1], ("hyprctl", "dispatch", 'hl.dsp.close({ window = "address:0xb" })'))
 
 
 class MatchTests(unittest.TestCase):

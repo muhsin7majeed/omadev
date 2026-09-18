@@ -95,16 +95,27 @@ def first(windows: Iterable[Window], predicate) -> Window | None:
     return None
 
 
+def _dispatch(runner: Runner, lua: str, classic: list[str], what: str) -> None:
+    """Run a dispatcher the way Omarchy's scripts do: the Lua form first,
+    because Hyprland with a Lua config rejects the classic syntax, then the
+    classic form for Hyprland builds without Lua."""
+    result = runner.run(["hyprctl", "dispatch", lua], timeout=HYPRCTL_TIMEOUT)
+    if result.ok and result.stdout.strip() == "ok":
+        return
+    fallback = runner.run(["hyprctl", "dispatch", *classic], timeout=HYPRCTL_TIMEOUT)
+    if fallback.ok and fallback.stdout.strip() == "ok":
+        return
+    raise HyprError(f"could not {what}: {fallback.message}")
+
+
 def focus(runner: Runner, window: Window) -> None:
-    result = runner.run(["hyprctl", "dispatch", "focuswindow", f"address:{window.address}"], timeout=HYPRCTL_TIMEOUT)
-    if not result.ok:
-        raise HyprError(f"could not focus {window.label}: {result.message}")
+    address = f"address:{window.address}"
+    _dispatch(runner, f'hl.dsp.focus({{ window = "{address}" }})', ["focuswindow", address], f"focus {window.label}")
 
 
 def close(runner: Runner, window: Window) -> None:
-    result = runner.run(["hyprctl", "dispatch", "closewindow", f"address:{window.address}"], timeout=HYPRCTL_TIMEOUT)
-    if not result.ok:
-        raise HyprError(f"could not close {window.label}: {result.message}")
+    address = f"address:{window.address}"
+    _dispatch(runner, f'hl.dsp.close({{ window = "{address}" }})', ["closewindow", address], f"close {window.label}")
 
 
 def window_for_pid(windows: Iterable[Window], pid: int, *, proc_root: Path = Path("/proc"), max_depth: int = 16) -> Window | None:

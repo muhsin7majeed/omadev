@@ -53,7 +53,7 @@ class StartTests(unittest.TestCase):
         self.runner.on_json("herdr", "pane", "list", result=PANES)
         self.runner.on_json("herdr", "pane", "process-info", result=BUSY)
         self.runner.on("herdr", "workspace", "focus")
-        self.runner.on("hyprctl", "dispatch")
+        self.runner.on("hyprctl", "dispatch", stdout="ok\n")
         # Port 3000 is published by kadha's own compose stack: ss sees only
         # the root-run docker proxy, docker ps attributes it to the project.
         self.fake.open_ports = {3000}
@@ -90,8 +90,8 @@ class StartTests(unittest.TestCase):
         self.assertTrue(steps.succeeded(list(results.values())))
 
         self.assertEqual(self.runner.detached, [])
-        focus_calls = [c for c in self.runner.calls if c[:3] == ("hyprctl", "dispatch", "focuswindow")]
-        self.assertEqual([c[3] for c in focus_calls], ["address:0xc", "address:0xa", "address:0xe"])
+        focus_calls = [c[2] for c in self.runner.calls if c[:2] == ("hyprctl", "dispatch")]
+        self.assertEqual(focus_calls, [f'hl.dsp.focus({{ window = "address:{a}" }})' for a in ("0xc", "0xa", "0xe")])
         self.assertIn(("herdr", "workspace", "focus", "w5"), self.runner.calls)
 
     def test_busy_pane_is_never_typed_into(self) -> None:
@@ -244,7 +244,7 @@ class StartTests(unittest.TestCase):
         self.fake.windows.append(window(address="0xf", cls="brave-localhost__-Default", title="Kadha", pid=9))
         results = self.start(kadha(self.path, browser="webapp"))
         self.assertEqual(results["browser"].status, steps.FOCUSED)
-        self.assertIn(("hyprctl", "dispatch", "focuswindow", "address:0xf"), self.runner.calls)
+        self.assertIn(("hyprctl", "dispatch", 'hl.dsp.focus({ window = "address:0xf" })'), self.runner.calls)
 
 
 class TmuxStartTests(unittest.TestCase):

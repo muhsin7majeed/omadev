@@ -115,7 +115,12 @@ the windows Start opened or focused, then close the workspace or session.
 | tmux session | `tmux has-session -t =name` | `tmux new-session -d` |
 | tmux command | `tmux list-windows` for `omadev-<name>`; `#{pane_current_command}` is a shell | `tmux new-window`, `tmux send-keys -l` + `Enter` |
 | dev server | TCP connect, then ownership: `ss -p` pid → `/proc` cwd inside the project; for docker-published ports, `docker ps` compose working-dir label | run the command in its tab; a port held by another project is `failed`, an unattributable one is left alone |
-| terminal | multiplexer client pid → parent pids → `hyprctl clients` pid | `hyprctl dispatch focuswindow`, else `omarchy-launch-terminal` |
+| terminal | multiplexer client pid → parent pids → `hyprctl clients` pid | focus dispatch, else `omarchy-launch-terminal` |
+
+Hyprland dispatch goes through `hypr._dispatch`: the Lua form first
+(`hl.dsp.focus({ window = "address:…" })`), because Omarchy's Hyprland uses a
+Lua config and rejects the classic syntax, then the classic form as fallback.
+Success is `ok` on stdout; some dispatch errors exit 0 with a message.
 | browser (webapp) | window class contains the URL host (Chromium app windows do) | `omarchy-launch-webapp`, else focus |
 | browser (tab) | not detectable; opened only when the server was not already up | `xdg-open` |
 | editor | class matches `editor.match` and title has the folder name as a word | focus, else launch (`uwsm-app --` unless an `omarchy-*` launcher) |

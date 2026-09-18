@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import urlsplit
 
-from . import hypr
+from . import hypr, ports
 from .config import Config, Project, url_port
 from .herdr import Herdr, HerdrError, attach_argv as herdr_attach_argv, client_pids as herdr_client_pids, tab_label
 from .system import Runner, SystemRunner, ToolMissing, gui_argv, list_processes, port_open, wait_for_port
@@ -67,6 +67,8 @@ class Services:
     wait: Callable[[str, int, float], bool]
     processes: Callable[[], list[tuple[int, list[str]]]]
     windows: Callable[[], list[hypr.Window]]
+    listener: Callable[[int], ports.Listener | None]
+    containers: Callable[[], list[ports.Container] | None]
     proc_root: Path = Path("/proc")
     sleep: Callable[[float], None] = time.sleep
     clock: Callable[[], float] = time.monotonic
@@ -82,7 +84,28 @@ class Services:
             wait=wait_for_port,
             processes=list_processes,
             windows=lambda: hypr.clients(runner),
+            listener=lambda port: ports.listener(runner, port),
+            containers=lambda: ports.containers(runner),
         )
+
+
+class PortInspector:
+    """Classifies ports for one project, asking docker at most once."""
+
+    def __init__(self, project: Project, services: Services) -> None:
+        self.project = project
+        self.s = services
+        self._containers: list[ports.Container] | None = None
+        self._asked_docker = False
+
+    def _containers_once(self) -> list[ports.Container] | None:
+        if not self._asked_docker:
+            self._asked_docker = True
+            self._containers = self.s.containers()
+        return self._containers
+
+    def state(self, port: int) -> ports.PortState:
+        return ports.classify(port, self.project.path, probe=self.s.probe, find_listener=self.s.listener, find_containers=self._containers_once)
 
 
 @dataclass(frozen=True)
@@ -107,6 +130,10 @@ class StartRun:
         self.dry_run = dry_run
         self.results: list[StepResult] = []
         self._windows: list[hypr.Window] | None = None
+        self.ports = PortInspector(project, services)
+        # Set when the URL's port belongs to another project: the browser
+        # must not open there, not even in a dry run's plan.
+        self.url_blocked = False
 
     # ------------------------------------------------------------- recording
 
@@ -212,9 +239,17 @@ class StartRun:
                 self.record(step, FAILED, str(exc))
 
     def _run_command(self, step: str, command, session: Session | None) -> None:
-        if command.port is not None and self.s.probe(LOCAL_HOST, command.port):
-            self.record(step, SKIPPED, f"port {command.port} is already listening")
-            return
+        if command.port is not None:
+            state = self.ports.state(command.port)
+            if state.owner == ports.PROJECT:
+                self.record(step, SKIPPED, f"port {command.port} is already served by {state.detail}")
+                return
+            if state.owner == ports.UNKNOWN:
+                self.record(step, SKIPPED, f"port {command.port} is listening ({state.detail}); not starting a second server")
+                return
+            if state.owner == ports.OTHER:
+                self.record(step, FAILED, f"port {command.port} is held by {state.detail}; stop that project first")
+                return
         if session is None:
             self.record(step, SKIPPED, "no workspace to run in")
             return
@@ -303,7 +338,15 @@ class StartRun:
         host = urlsplit(url).hostname or LOCAL_HOST
         port = url_port(url)
         if self.s.probe(host, port):
-            self.record(step, SKIPPED, f"{host}:{port} is already reachable")
+            if ports.is_local_host(host):
+                state = self.ports.state(port)
+                if state.owner == ports.OTHER:
+                    self.url_blocked = True
+                    self.record(step, FAILED, f"{host}:{port} is served by {state.detail}, not by this project")
+                    return False, False
+                self.record(step, SKIPPED, f"{host}:{port} is already reachable ({state.detail})")
+            else:
+                self.record(step, SKIPPED, f"{host}:{port} is already reachable")
             return True, True
         timeout = self.project.wait_timeout
         if self.dry_run:
@@ -322,6 +365,9 @@ class StartRun:
         if url is None:
             self.record(step, SKIPPED, "no url configured")
             return
+        if self.url_blocked:
+            self.record(step, SKIPPED, "url belongs to another project (see the wait step)")
+            return
         mode = self.config.browser_for(self.project)
         try:
             if mode == "webapp":
@@ -335,7 +381,7 @@ class StartRun:
                     self.focus(step, window, "web app window")
                     return
                 if not reachable and not self.dry_run:
-                    self.record(step, SKIPPED, "url not reachable, not opening a web app window")
+                    self.record(step, SKIPPED, "url not available (see the wait step), not opening a web app window")
                     return
                 self.act(step, f"open {url} as a web app window", lambda: self.s.runner.detach(["omarchy-launch-webapp", url]))
                 return
@@ -343,7 +389,7 @@ class StartRun:
                 self.record(step, SKIPPED, "server was already up; an open tab cannot be detected, so none was opened")
                 return
             if not reachable and not self.dry_run:
-                self.record(step, SKIPPED, "url not reachable, not opening a browser tab")
+                self.record(step, SKIPPED, "url not available (see the wait step), not opening a browser tab")
                 return
             self.act(step, f"open {url} in the browser", lambda: self.s.runner.detach(["xdg-open", url]))
         except StepError as exc:
@@ -417,13 +463,21 @@ def status(project: Project, config: Config, services: Services) -> dict:
     except StepError as exc:
         snapshot["workspace"] = {"present": False, "id": None, "error": str(exc)}
 
-    snapshot["commands"] = [
-        {"name": c.name, "port": c.port, "listening": services.probe(LOCAL_HOST, c.port) if c.port is not None else None}
-        for c in project.commands
-    ]
+    inspector = PortInspector(project, services)
+    snapshot["commands"] = []
+    for command in project.commands:
+        entry: dict = {"name": command.name, "port": command.port, "listening": None, "owner": None, "detail": None}
+        if command.port is not None:
+            entry.update(inspector.state(command.port).to_dict())
+        snapshot["commands"].append(entry)
     if project.url is not None:
         host = urlsplit(project.url).hostname or LOCAL_HOST
-        snapshot["url"] = {"value": project.url, "reachable": services.probe(host, url_port(project.url))}
+        port = url_port(project.url)
+        entry = {"value": project.url, "reachable": services.probe(host, port), "owner": None, "detail": None}
+        if entry["reachable"] and ports.is_local_host(host):
+            state = inspector.state(port)
+            entry.update({"owner": state.owner, "detail": state.detail})
+        snapshot["url"] = entry
     else:
         snapshot["url"] = None
 

@@ -52,6 +52,7 @@ omadev_cli/
   config.py            projects file: dataclasses, validation, atomic save
   system.py            Runner (subprocess without a shell, always a timeout), ports, /proc
   hypr.py              hyprctl clients, window matching, focus, pid -> window
+  ports.py             who owns a listening port: process cwd via ss + /proc, or docker ps
   herdr.py             herdr CLI wrapper: workspaces, tabs, panes, foreground process
   tmux.py              tmux wrapper with the same shape
   steps.py             the Start flow: check-then-act steps, dry run, status snapshot
@@ -113,16 +114,21 @@ the windows Start opened or focused, then close the workspace or session.
 | herdr command | `herdr tab list` for `omadev-<name>`; `herdr pane process-info` for an idle shell | `herdr tab create`, `herdr pane run` |
 | tmux session | `tmux has-session -t =name` | `tmux new-session -d` |
 | tmux command | `tmux list-windows` for `omadev-<name>`; `#{pane_current_command}` is a shell | `tmux new-window`, `tmux send-keys -l` + `Enter` |
-| dev server | TCP connect to `localhost:<port>` | run the command in its tab |
+| dev server | TCP connect, then ownership: `ss -p` pid → `/proc` cwd inside the project; for docker-published ports, `docker ps` compose working-dir label | run the command in its tab; a port held by another project is `failed`, an unattributable one is left alone |
 | terminal | multiplexer client pid → parent pids → `hyprctl clients` pid | `hyprctl dispatch focuswindow`, else `omarchy-launch-terminal` |
 | browser (webapp) | window class contains the URL host (Chromium app windows do) | `omarchy-launch-webapp`, else focus |
 | browser (tab) | not detectable; opened only when the server was not already up | `xdg-open` |
 | editor | class matches `editor.match` and title has the folder name as a word | focus, else launch (`uwsm-app --` unless an `omarchy-*` launcher) |
 | apps | `match` regex over class and title | focus, else launch |
 
-The port check cannot tell whose server is listening; one project per port is
-assumed. Prefer the `omarchy-launch-*` commands over reimplementing them; they
-already encode how Omarchy launches terminals, TUIs, web apps and editors.
+Port ownership (`ports.py`) has four answers: `free`, `project`, `other`,
+`unknown`. Only `free` starts a server; `other` fails the command and the wait
+step so the browser never opens on another project's site; `unknown` (a
+listener whose owner is not visible and no container publishes the port) is
+skipped with a note. `docker ps` is asked at most once per run.
+
+Prefer the `omarchy-launch-*` commands over reimplementing them; they already
+encode how Omarchy launches terminals, TUIs, web apps and editors.
 
 ### Configuration
 

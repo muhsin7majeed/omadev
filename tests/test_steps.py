@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from omadev_cli import config as cfg
-from omadev_cli import steps
+from omadev_cli import ports, steps
 from omadev_cli.system import CommandResult
 from tests.fakes import FakeServices, window
 from tests.test_herdr import BUSY, IDLE, PANES, TABS, WORKSPACES
@@ -54,7 +54,11 @@ class StartTests(unittest.TestCase):
         self.runner.on_json("herdr", "pane", "process-info", result=BUSY)
         self.runner.on("herdr", "workspace", "focus")
         self.runner.on("hyprctl", "dispatch")
+        # Port 3000 is published by kadha's own compose stack: ss sees only
+        # the root-run docker proxy, docker ps attributes it to the project.
         self.fake.open_ports = {3000}
+        self.fake.listeners[3000] = ports.Listener(pid=None, name="", cwd=None)
+        self.fake.containers = [ports.Container("kadha-client-1", frozenset({3000}), self.path)]
         self.fake.processes = [(100, ["herdr"]), (1, ["/usr/bin/herdr", "server"])]
         self.fake.windows = [
             window(address="0xc", cls="com.mitchellh.ghostty", title="nitrogen: kadha", pid=50),
@@ -75,7 +79,8 @@ class StartTests(unittest.TestCase):
         self.assertEqual(results["workspace"].status, steps.SKIPPED)
         self.assertIn("w5", results["workspace"].detail)
         self.assertEqual(results["command:app"].status, steps.SKIPPED)
-        self.assertIn("3000", results["command:app"].detail)
+        self.assertIn("kadha-client-1", results["command:app"].detail)
+        self.assertEqual(self.fake.docker_asked, 1, "docker ps is asked at most once per run")
         self.assertEqual(results["terminal"].status, steps.FOCUSED)
         self.assertEqual(results["terminal:focus"].status, steps.FOCUSED)
         self.assertEqual(results["wait"].status, steps.SKIPPED)
@@ -203,6 +208,37 @@ class StartTests(unittest.TestCase):
         order = [r.step for r in results]
         self.assertLess(order.index("editor"), order.index("wait"))
 
+    def test_port_held_by_another_project_refuses(self) -> None:
+        self.everything_running()
+        other = Path(self.tmp.name) / "muhsi.in"
+        other.mkdir()
+        self.fake.listeners[3000] = ports.Listener(pid=77, name="node", cwd=other)
+        self.fake.containers = []
+        results = self.start(kadha(self.path))
+        self.assertEqual(results["command:app"].status, steps.FAILED)
+        self.assertIn("muhsi.in", results["command:app"].detail)
+        self.assertEqual(results["wait"].status, steps.FAILED)
+        self.assertEqual(results["browser"].status, steps.SKIPPED)
+        self.assertIn("another project", results["browser"].detail)
+        self.assertNotIn(("xdg-open", "http://localhost:3000"), self.runner.detached)
+        self.assertFalse(steps.succeeded(list(results.values())))
+        # The rest still happens: the terminal is focused and the editor opens.
+        self.assertEqual(results["terminal"].status, steps.FOCUSED)
+        self.assertEqual(results["editor"].status, steps.FOCUSED)
+
+        # A dry run must not plan to open the browser on the other project either.
+        plan = self.start(kadha(self.path), dry_run=True)
+        self.assertEqual(plan["browser"].status, steps.SKIPPED)
+        self.assertEqual(plan["wait"].status, steps.FAILED)
+
+    def test_port_with_unknown_owner_is_left_alone(self) -> None:
+        self.everything_running()
+        self.fake.containers = None      # docker not installed
+        results = self.start(kadha(self.path))
+        self.assertEqual(results["command:app"].status, steps.SKIPPED)
+        self.assertIn("not starting a second server", results["command:app"].detail)
+        self.assertEqual(results["wait"].status, steps.SKIPPED)
+
     def test_webapp_mode_focuses_app_window(self) -> None:
         self.everything_running()
         self.fake.windows.append(window(address="0xf", cls="brave-localhost__-Default", title="Kadha", pid=9))
@@ -250,11 +286,15 @@ class StatusTests(unittest.TestCase):
         fake.open_ports = {3000}
         fake.windows = [window(cls="dev.zed.Zed", title="kadha — x")]
         with tempfile.TemporaryDirectory() as tmp:
-            config = kadha(Path(tmp) / "kadha")
+            path = Path(tmp) / "kadha"
+            fake.listeners[3000] = ports.Listener(pid=4, name="node", cwd=path / "client")
+            config = kadha(path)
             snapshot = steps.status(config.projects[0], config, fake.build())
         self.assertEqual(snapshot["workspace"], {"present": True, "id": "w5"})
-        self.assertEqual(snapshot["commands"], [{"name": "app", "port": 3000, "listening": True}])
+        command = snapshot["commands"][0]
+        self.assertEqual((command["name"], command["port"], command["listening"], command["owner"]), ("app", 3000, True, "project"))
         self.assertTrue(snapshot["url"]["reachable"])
+        self.assertEqual(snapshot["url"]["owner"], "project")
         self.assertTrue(snapshot["editor_open"])
         self.assertEqual(snapshot["apps"], [{"name": "lazydocker", "open": False}])
         self.assertEqual(fake.runner.mutating_calls(), [])

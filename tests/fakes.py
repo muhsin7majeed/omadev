@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from omadev_cli import hypr, steps
+from omadev_cli import hypr, ports, steps
 from omadev_cli.herdr import Herdr
 from omadev_cli.system import CommandResult, ToolMissing
 from omadev_cli.tmux import Tmux
@@ -89,9 +89,12 @@ class FakeServices:
     ports_after_wait: set[int] = field(default_factory=set)
     windows: list[hypr.Window] = field(default_factory=list)
     processes: list[tuple[int, list[str]]] = field(default_factory=list)
+    listeners: dict[int, ports.Listener] = field(default_factory=dict)
+    containers: list[ports.Container] | None = field(default_factory=list)
     proc_root: Path = Path("/nonexistent-proc")
     waited: list[tuple[str, int, float]] = field(default_factory=list)
     now: float = 0.0
+    docker_asked: int = 0
 
     def probe(self, host: str, port: int) -> bool:
         return port in self.open_ports
@@ -107,6 +110,13 @@ class FakeServices:
     def clock(self) -> float:
         return self.now
 
+    def find_listener(self, port: int) -> ports.Listener | None:
+        return self.listeners.get(port)
+
+    def find_containers(self) -> list[ports.Container] | None:
+        self.docker_asked += 1
+        return None if self.containers is None else list(self.containers)
+
     def build(self) -> steps.Services:
         return steps.Services(
             runner=self.runner,
@@ -116,6 +126,8 @@ class FakeServices:
             wait=self.wait,
             processes=lambda: list(self.processes),
             windows=lambda: list(self.windows),
+            listener=self.find_listener,
+            containers=self.find_containers,
             proc_root=self.proc_root,
             sleep=self.sleep,
             clock=self.clock,

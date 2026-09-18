@@ -151,15 +151,32 @@ def _print_status(result: dict[str, Any], out: TextIO) -> None:
         out.write(f"  {snapshot['multiplexer']:<9} {'present' if workspace['present'] else 'absent'}"
                   f"{' (' + workspace['id'] + ')' if workspace.get('id') else ''}\n")
         for command in snapshot["commands"]:
-            state = "no port" if command["listening"] is None else ("listening" if command["listening"] else "down")
+            if command["listening"] is None:
+                state = "no port"
+            elif command["listening"]:
+                state = f"listening, {_owner_phrase(command)}"
+            else:
+                state = "down"
             port = f" :{command['port']}" if command["port"] is not None else ""
             out.write(f"  command   {command['name']}{port} {state}\n")
         if snapshot["url"]:
-            out.write(f"  url       {snapshot['url']['value']} {'reachable' if snapshot['url']['reachable'] else 'down'}\n")
+            url = snapshot["url"]
+            state = f"reachable, {_owner_phrase(url)}" if url["reachable"] else "down"
+            out.write(f"  url       {url['value']} {state}\n")
         if snapshot.get("editor_open") is not None:
             out.write(f"  editor    {'open' if snapshot['editor_open'] else 'closed'}\n")
         for app in snapshot["apps"]:
             out.write(f"  app       {app['name']} {'open' if app['open'] else 'closed'}\n")
+
+
+def _owner_phrase(entry: dict[str, Any]) -> str:
+    owner = entry.get("owner")
+    detail = entry.get("detail") or ""
+    if owner == "project":
+        return "this project"
+    if owner == "other":
+        return f"OTHER: {detail}"
+    return f"owner unknown ({detail})" if detail else "owner unknown"
 
 
 def _print_start(result: dict[str, Any], out: TextIO) -> None:
@@ -217,6 +234,8 @@ def emit(command: str, result: dict[str, Any], *, as_json: bool, out: TextIO, er
         return
     if result.get("ok") or "steps" in result:
         _TEXT_PRINTERS[command](result, out)
+        # stdout is buffered and stderr is not; keep the terminal order sane.
+        out.flush()
     if not result.get("ok"):
         err.write(f"omadev: {result.get('error', 'failed')}\n")
     for warning in result.get("warnings", ()):

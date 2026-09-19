@@ -56,7 +56,7 @@ class ClientsTests(unittest.TestCase):
     def test_close_dispatch_forms(self) -> None:
         runner = FakeRunner().on("hyprctl", "dispatch", stdout="ok\n")
         hypr.close(runner, window(address="0xb"))
-        self.assertEqual(runner.calls[-1], ("hyprctl", "dispatch", 'hl.dsp.close({ window = "address:0xb" })'))
+        self.assertEqual(runner.calls[-1], ("hyprctl", "dispatch", 'hl.dsp.window.close({ window = "address:0xb" })'))
 
 
 class MatchTests(unittest.TestCase):

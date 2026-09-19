@@ -317,10 +317,10 @@ class StopTests(unittest.TestCase):
         self.assertEqual(results["browser"].status, steps.SKIPPED)
         self.assertIn("tab left open", results["browser"].detail)
         closes = [c[2] for c in self.runner.calls if c[:2] == ("hyprctl", "dispatch")]
-        self.assertEqual(closes, ['hl.dsp.close({ window = "address:0xe" })', 'hl.dsp.close({ window = "address:0xa" })'])
+        self.assertEqual(closes, ['hl.dsp.window.close({ window = "address:0xe" })', 'hl.dsp.window.close({ window = "address:0xa" })'])
         # Never touched: the workspace and the terminal.
         self.assertNotIn(("herdr", "workspace", "close", "w5"), self.runner.calls)
-        self.assertNotIn('hl.dsp.close({ window = "address:0xc" })', closes)
+        self.assertNotIn('hl.dsp.window.close({ window = "address:0xc" })', closes)
 
     def test_stop_command_runs_in_project_dir_without_a_shell(self) -> None:
         self.running_project()

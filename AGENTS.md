@@ -129,9 +129,12 @@ tabs alone because they are the user's or cannot be told apart:
 | terminal | multiplexer client pid → parent pids → `hyprctl clients` pid | focus dispatch, else `omarchy-launch-terminal` |
 
 Hyprland dispatch goes through `hypr._dispatch`: the Lua form first
-(`hl.dsp.focus({ window = "address:…" })`), because Omarchy's Hyprland uses a
-Lua config and rejects the classic syntax, then the classic form as fallback.
-Success is `ok` on stdout; some dispatch errors exit 0 with a message.
+(`hl.dsp.focus({ window = "address:…" })`, `hl.dsp.window.close({ window = … })`),
+because Omarchy's Hyprland uses a Lua config and rejects the classic syntax,
+then the classic form as fallback. Success is `ok` on stdout; dispatch errors
+exit 0 with a message, so the output is what is checked. The Lua API is
+documented in `/usr/share/hypr/stubs/hl.meta.lua`; window dispatchers live
+under `hl.dsp.window`, focus at the top level.
 | browser (webapp) | window class contains the URL host (Chromium app windows do) | `omarchy-launch-webapp`, else focus |
 | browser (tab) | not detectable; opened only when the server was not already up | `xdg-open` |
 | editor | class matches `editor.match` and title has the folder name as a word | focus, else launch (`uwsm-app --` unless an `omarchy-*` launcher) |

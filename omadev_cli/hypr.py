@@ -115,7 +115,9 @@ def focus(runner: Runner, window: Window) -> None:
 
 def close(runner: Runner, window: Window) -> None:
     address = f"address:{window.address}"
-    _dispatch(runner, f'hl.dsp.close({{ window = "{address}" }})', ["closewindow", address], f"close {window.label}")
+    # Window dispatchers live under hl.dsp.window in Hyprland's Lua API;
+    # focus is the exception and sits at the top level.
+    _dispatch(runner, f'hl.dsp.window.close({{ window = "{address}" }})', ["closewindow", address], f"close {window.label}")
 
 
 def window_for_pid(windows: Iterable[Window], pid: int, *, proc_root: Path = Path("/proc"), max_depth: int = 16) -> Window | None:

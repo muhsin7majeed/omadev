@@ -3,10 +3,10 @@ import qs.Commons
 import qs.Ui
 
 // One labelled input for a scalar field of the project schema: string,
-// path, url, regex, argv, integer or enum. It never interprets the value:
-// text stays text and the CLI converts and validates. An argv value that
-// arrives as a list (from `omadev show`) is displayed as one shell-quoted
-// line, which is also what the CLI accepts back.
+// path, url, regex, argv, integer, workspace, boolean or enum. It never
+// interprets the value: text stays text and the CLI converts and validates.
+// An argv value that arrives as a list (from `omadev show`) is displayed as
+// one shell-quoted line, which is also what the CLI accepts back.
 Column {
   id: field
 
@@ -16,6 +16,7 @@ Column {
   property bool invalid: false
   // Help is a "?" tooltip by default; the form's toggle shows it inline.
   property bool showHelp: false
+  property int workspaceChoices: 10
   property color foreground: Color.popups.text
   property color muted: Qt.alpha(foreground, 0.6)
   property string fontFamily: Style.font.family
@@ -27,6 +28,7 @@ Column {
   readonly property string help: String(spec.help || "")
   readonly property string example: String(spec.example || "")
   readonly property bool optional: spec.optional === true
+  readonly property bool choice: kind === "enum" || kind === "workspace"
   readonly property string display: kind === "argv" ? argvText(value) : (value === null || value === undefined ? "" : String(value))
 
   function argvText(list) {
@@ -38,6 +40,13 @@ Column {
     var text = String(part)
     if (text === "") return "''"
     return /[\s'"\\$]/.test(text) ? "'" + text.replace(/'/g, "'\\''") + "'" : text
+  }
+
+  function options() {
+    if (kind === "enum") return spec.options || []
+    var list = [{ value: "", label: "Wherever it opens" }]
+    for (var i = 1; i <= workspaceChoices; i++) list.push({ value: String(i), label: "Workspace " + i })
+    return list
   }
 
   width: parent ? parent.width : implicitWidth
@@ -78,7 +87,7 @@ Column {
 
   Loader {
     width: parent.width
-    sourceComponent: field.kind === "enum" ? enumInput : (field.kind === "boolean" ? booleanInput : textInput)
+    sourceComponent: field.choice ? choiceInput : (field.kind === "boolean" ? booleanInput : textInput)
   }
 
   Text {
@@ -135,12 +144,12 @@ Column {
   }
 
   Component {
-    id: enumInput
+    id: choiceInput
 
     Dropdown {
       width: field.width
       showLabel: false
-      options: field.spec.options || []
+      options: field.options()
       value: field.value === null || field.value === undefined ? "" : String(field.value)
       foreground: field.foreground
       fontFamily: field.fontFamily

@@ -37,7 +37,7 @@ class SchemaParityTests(unittest.TestCase):
 
     def test_every_field_has_the_shape_the_form_needs(self) -> None:
         text_kinds = {"string", "path", "url", "regex", "argv", "integer"}
-        known_kinds = text_kinds | {"boolean", "enum", "object", "list"}
+        known_kinds = text_kinds | {"boolean", "enum", "object", "list", "workspace"}
 
         def check(fields: list[dict], where: str) -> None:
             for field in fields:
@@ -61,15 +61,63 @@ class SchemaParityTests(unittest.TestCase):
 
         check(schema.PROJECT_FIELDS, "project")
 
-    def test_editor_presets_validate(self) -> None:
+    def test_editor_and_app_presets_validate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             for preset in schema.EDITOR_PRESETS:
                 with self.subTest(preset=preset["label"]):
                     project, _ = forms.project_from_form({"name": "x", "path": tmp, "editor": preset["value"]})
                     self.assertIsNotNone(project)
+            for preset in schema.APP_PRESETS:
+                with self.subTest(preset=preset["label"]):
+                    project, _ = forms.project_from_form({"name": "x", "path": tmp, "apps": [preset["value"]]})
+                    self.assertEqual(project.apps[0].name, preset["value"]["name"])
 
-    def test_describe_is_json_serialisable(self) -> None:
-        json.dumps(schema.describe())
+    def test_sections_cover_every_field_exactly_once(self) -> None:
+        covered: list[str] = []
+        for section in schema.SECTIONS:
+            covered.extend(section["fields"])
+        self.assertEqual(len(covered), len(set(covered)), "a field appears in two sections")
+        top_level = {k.split(".")[0] for k in covered}
+        self.assertEqual(top_level, {f["key"] for f in schema.PROJECT_FIELDS} - {"workspaces"} | {"workspaces"})
+        # Every child of an object reached by dotted keys is placed somewhere.
+        dotted = {k for k in covered if "." in k}
+        self.assertEqual(dotted, {"workspaces.terminal", "workspaces.browser", "workspaces.editor"})
+        # And nothing is placed both as a whole and by its parts.
+        self.assertNotIn("workspaces", covered)
+        for section in schema.sections():
+            for field in section["fields"]:
+                self.assertIn("kind", field)
+                self.assertIn("help", field)
+
+    def test_describe_names_the_default_browser(self) -> None:
+        described = schema.describe("browser")
+        json.dumps(described)
+        browser = next(f for s in described["sections"] for f in s["fields"] if f["key"] == "browser")
+        self.assertEqual(browser["options"][0]["label"], "Default (tab in the browser)")
+        # The module-level schema is left untouched.
+        self.assertEqual(schema.PROJECT_FIELDS[7]["options"][0]["label"], "Default")
+
+
+class DerivedNameTests(unittest.TestCase):
+    def test_names_are_derived_from_commands(self) -> None:
+        self.assertEqual(cfg.derive_name("docker compose up"), "docker-compose-up")
+        self.assertEqual(cfg.derive_name("npm run dev -- --host 0.0.0.0"), "npm-run-dev-host-0.0.0.0")
+        self.assertEqual(cfg.derive_name("   "), "process")
+        self.assertEqual(cfg.derive_app_name(("omarchy-launch-tui", "lazydocker")), "lazydocker")
+        self.assertEqual(cfg.derive_app_name(("/usr/bin/postman",)), "postman")
+        self.assertEqual(cfg.derive_app_name(("omarchy-launch-webapp", "https://app.example.com/x")), "app.example.com-x")
+
+    def test_missing_names_are_filled_and_still_unique(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project, _ = forms.project_from_form({"name": "x", "path": tmp,
+                                                  "commands": [{"run": "npm run dev", "port": "3000"}, {"run": "npm run api"}],
+                                                  "setup": [{"run": "npm install"}],
+                                                  "apps": [{"launch": "omarchy-launch-tui lazydocker", "match": "lazydocker"}]})
+            self.assertEqual([c.name for c in project.commands], ["npm-run-dev", "npm-run-api"])
+            self.assertEqual(project.setup[0].name, "npm-install")
+            self.assertEqual(project.apps[0].name, "lazydocker")
+            with self.assertRaises(cfg.ConfigError):
+                forms.project_from_form({"name": "x", "path": tmp, "commands": [{"run": "npm run dev"}, {"run": "npm run dev"}]})
 
 
 class NormaliseTests(unittest.TestCase):

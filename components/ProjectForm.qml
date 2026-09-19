@@ -2,13 +2,17 @@ import QtQuick
 import qs.Commons
 import qs.Ui
 
-// The add/edit form, rendered from the schema the CLI describes. It holds a
-// draft object and hands it back untouched on Save; the CLI normalises and
+// The add/edit form, rendered from the sections the CLI describes. It holds
+// a draft object and hands it back untouched on Save; the CLI normalises and
 // validates, and any error comes back here with the field it belongs to.
+//
+// A section field may use a dotted key (`workspaces.terminal`) to reach into
+// a stored object, so a value can be shown next to what it belongs to
+// without changing where it is stored.
 Column {
   id: form
 
-  property var schema: []
+  property var sections: []
   property var draft: ({})
   property string title: "New project"
   property bool editing: false
@@ -22,21 +26,46 @@ Column {
   property color muted: Qt.alpha(foreground, 0.6)
   property string fontFamily: Style.font.family
 
+  // Which collapsible sections are open, by section key.
+  property var opened: ({})
+
   signal saveRequested(var project)
   signal cancelRequested()
   signal deleteRequested()
 
+  function get(key) {
+    var parts = String(key).split(".")
+    var node = draft
+    for (var i = 0; i < parts.length; i++) {
+      if (node === null || node === undefined || typeof node !== "object") return undefined
+      node = node[parts[i]]
+    }
+    return node
+  }
+
   // Reassign the whole draft: bindings re-evaluate on assignment, not on
-  // in-place mutation.
+  // in-place mutation. A dotted key creates the intermediate object.
   function set(key, next) {
-    var copy = {}
-    for (var k in draft) copy[k] = draft[k]
-    copy[key] = next
+    var parts = String(key).split(".")
+    var copy = shallow(draft)
+    var node = copy
+    for (var i = 0; i < parts.length - 1; i++) {
+      var child = node[parts[i]]
+      node[parts[i]] = child && typeof child === "object" ? shallow(child) : {}
+      node = node[parts[i]]
+    }
+    node[parts[parts.length - 1]] = next
     draft = copy
-    if (errorKey === key) {
+    if (errorKey === parts[0]) {
       errorKey = ""
       errorText = ""
     }
+  }
+
+  function shallow(source) {
+    var out = {}
+    for (var k in source) out[k] = source[k]
+    return out
   }
 
   // `visible_if` on a schema field: {key} shows it once that field has a
@@ -45,13 +74,34 @@ Column {
   function visibleFor(spec) {
     var cond = spec.visible_if
     if (!cond || !cond.key) return true
-    var value = draft[cond.key]
+    var value = get(cond.key)
     if (cond["not"] !== undefined) return String(value === undefined || value === null ? "" : value) !== String(cond["not"])
     return value !== undefined && value !== null && value !== ""
   }
 
+  function isOpen(section) {
+    if (section.collapsed !== true) return true
+    return opened[section.key] === true
+  }
+
+  function toggleSection(section) {
+    var next = shallow(opened)
+    next[section.key] = !isOpen(section)
+    opened = next
+  }
+
+  function errorIn(section) {
+    if (errorKey === "") return false
+    for (var i = 0; i < section.fields.length; i++) {
+      if (String(section.fields[i].key).split(".")[0] === errorKey) return true
+    }
+    return false
+  }
+
   width: parent ? parent.width : implicitWidth
   spacing: Style.spacing.lg
+
+  // ------------------------------------------------------------- header
 
   Item {
     width: parent.width
@@ -80,16 +130,35 @@ Column {
       fontFamily: form.fontFamily
     }
 
-    PanelActionButton {
+    Row {
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
-      // U+F0625, nf-md-help-circle-outline.
-      iconText: "󰘥"
-      tooltipText: form.showHelp ? "Hide field descriptions" : "Show all field descriptions"
-      foreground: form.showHelp ? Color.accent : form.muted
-      hoverColor: Color.accent
-      fontFamily: form.fontFamily
-      onClicked: form.showHelp = !form.showHelp
+      spacing: Style.spacing.xs
+
+      PanelActionButton {
+        anchors.verticalCenter: parent.verticalCenter
+        // U+F0625, nf-md-help-circle-outline.
+        iconText: "󰘥"
+        tooltipText: form.showHelp ? "Hide field descriptions" : "Show all field descriptions"
+        foreground: form.showHelp ? Color.accent : form.muted
+        hoverColor: Color.accent
+        fontFamily: form.fontFamily
+        onClicked: form.showHelp = !form.showHelp
+      }
+
+      // Delete lives up here, far from Save, and still asks first.
+      PanelActionButton {
+        visible: form.editing
+        anchors.verticalCenter: parent.verticalCenter
+        // U+F01B4, nf-md-delete.
+        iconText: "󰆴"
+        tooltipText: "Remove this project from omadev"
+        foreground: form.muted
+        hoverColor: Color.urgent
+        fontFamily: form.fontFamily
+        enabled: !form.busy
+        onClicked: form.deleteRequested()
+      }
     }
   }
 
@@ -104,45 +173,110 @@ Column {
     font.pixelSize: Style.font.caption
   }
 
+  // ----------------------------------------------------------- sections
+
   Flickable {
     id: scroller
     width: parent.width
-    height: Math.min(fields.implicitHeight, form.maxFieldsHeight)
+    height: Math.min(sectionsColumn.implicitHeight, form.maxFieldsHeight)
     contentWidth: width
-    contentHeight: fields.implicitHeight
+    contentHeight: sectionsColumn.implicitHeight
     clip: true
     boundsBehavior: Flickable.StopAtBounds
     interactive: contentHeight > height
 
     Column {
-      id: fields
+      id: sectionsColumn
       width: scroller.width
-      spacing: Style.spacing.xxl
+      spacing: Style.spacing.xl
 
       Repeater {
-        model: form.schema
+        model: form.sections
 
-        Loader {
-          id: slot
+        Column {
+          id: sectionItem
           required property var modelData
-          readonly property string key: String(modelData.key || "")
-          readonly property string kind: String(modelData.kind || "string")
+          required property int index
+          readonly property bool open: form.isOpen(modelData)
+          readonly property bool collapsible: modelData.collapsed === true
 
           width: parent.width
-          visible: form.visibleFor(modelData)
-          sourceComponent: kind === "list" ? listField : (kind === "object" ? objectField : scalarField)
+          spacing: Style.spacing.md
 
-          onLoaded: {
-            item.spec = modelData
-            item.value = Qt.binding(function() { return form.draft[slot.key] })
-            item.changed.connect(function(next) { form.set(slot.key, next) })
-            if ("invalid" in item) item.invalid = Qt.binding(function() { return form.errorKey === slot.key })
-            if ("showHelp" in item) item.showHelp = Qt.binding(function() { return form.showHelp })
+          PanelSeparator {
+            visible: sectionItem.index > 0
+            foreground: form.foreground
+          }
+
+          Item {
+            width: parent.width
+            height: sectionTitle.implicitHeight + Style.spacing.xs
+
+            Row {
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.spacing.sm
+
+              Text {
+                id: sectionTitle
+                textFormat: Text.PlainText
+                text: String(sectionItem.modelData.title || "")
+                color: form.errorIn(sectionItem.modelData) ? Color.urgent : form.foreground
+                font.family: form.fontFamily
+                font.pixelSize: Style.font.subtitle
+                font.bold: true
+              }
+
+              Text {
+                visible: sectionItem.collapsible
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText
+                text: sectionItem.open ? "hide" : "show"
+                color: titleHover.hovered ? Color.accent : form.muted
+                font.family: form.fontFamily
+                font.pixelSize: Style.font.caption
+                font.underline: titleHover.hovered
+              }
+            }
+
+            HoverHandler { id: titleHover; enabled: sectionItem.collapsible; cursorShape: Qt.PointingHandCursor }
+            TapHandler { enabled: sectionItem.collapsible; onTapped: form.toggleSection(sectionItem.modelData) }
+          }
+
+          Column {
+            visible: sectionItem.open
+            width: parent.width
+            spacing: Style.spacing.xl
+
+            Repeater {
+              model: sectionItem.modelData.fields || []
+
+              Loader {
+                id: slot
+                required property var modelData
+                readonly property string key: String(modelData.key || "")
+                readonly property string kind: String(modelData.kind || "string")
+
+                width: parent.width
+                visible: form.visibleFor(modelData)
+                sourceComponent: kind === "list" ? listField : (kind === "object" ? objectField : scalarField)
+
+                onLoaded: {
+                  item.spec = modelData
+                  item.value = Qt.binding(function() { return form.get(slot.key) })
+                  item.changed.connect(function(next) { form.set(slot.key, next) })
+                  if ("invalid" in item) item.invalid = Qt.binding(function() { return form.errorKey === slot.key.split(".")[0] })
+                  if ("showHelp" in item) item.showHelp = Qt.binding(function() { return form.showHelp })
+                }
+              }
+            }
           }
         }
       }
     }
   }
+
+  // ------------------------------------------------------------- kinds
 
   Component {
     id: scalarField
@@ -154,7 +288,6 @@ Column {
     }
   }
 
-  // Object and list fields draw their own label so the group reads as one.
   Component {
     id: objectField
 
@@ -262,6 +395,8 @@ Column {
     }
   }
 
+  // ------------------------------------------------------------- footer
+
   Row {
     spacing: Style.spacing.sm
 
@@ -284,17 +419,6 @@ Column {
       fontFamily: form.fontFamily
       fontSize: Style.font.caption
       onClicked: form.cancelRequested()
-    }
-
-    Button {
-      visible: form.editing
-      text: "Delete project"
-      bordered: true
-      enabled: !form.busy
-      foreground: Color.urgent
-      fontFamily: form.fontFamily
-      fontSize: Style.font.caption
-      onClicked: form.deleteRequested()
     }
   }
 }

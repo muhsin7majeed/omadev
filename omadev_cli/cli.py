@@ -96,8 +96,9 @@ def cmd_show(args: argparse.Namespace) -> Result:
 
 
 def cmd_schema(args: argparse.Namespace) -> Result:
-    """The form description the widget renders."""
-    return {"ok": True, **schema.describe()}, EXIT_OK
+    """The form description the widget renders, with the file's defaults named."""
+    config = cfg.load(args.file or cfg.projects_file(), check_paths=False)
+    return {"ok": True, **schema.describe(config.default_browser)}, EXIT_OK
 
 
 def _decode_project_argument(text: str) -> Any:
@@ -269,9 +270,11 @@ def _print_removed(result: dict[str, Any], out: TextIO) -> None:
 
 
 def _print_schema(result: dict[str, Any], out: TextIO) -> None:
-    for field in result["fields"]:
-        flag = "" if field.get("optional") else " (required)"
-        out.write(f"{field['key']:<14} {field['kind']:<8} {field['label']}{flag}\n")
+    for section in result["sections"]:
+        out.write(f"[{section['title']}]{' (collapsed)' if section.get('collapsed') else ''}\n")
+        for field in section["fields"]:
+            flag = "" if field.get("optional") else " (required)"
+            out.write(f"  {field['key']:<22} {field['kind']:<10} {field['label']}{flag}\n")
 
 
 _TEXT_PRINTERS: dict[str, Callable[[dict[str, Any], TextIO], None]] = {

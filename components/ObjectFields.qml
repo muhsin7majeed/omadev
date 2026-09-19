@@ -2,10 +2,14 @@ import QtQuick
 import qs.Commons
 import qs.Ui
 
-// A group of scalar fields for an `object` schema field, such as the editor.
-// When the schema offers presets, a dropdown picks one and fills the fields;
-// editing any field afterwards turns the selection into "Custom". A preset
-// whose value is null means "unset", and hides the fields.
+// A group of scalar fields for an object: the editor, or one row of a list
+// such as a process or a helper app.
+//
+// With presets, a dropdown picks one and fills the fields; the fields stay
+// hidden while a preset is selected, except those flagged `always`, and
+// appear for "Custom". Fields flagged `advanced` sit behind "More options".
+// A preset whose value is null means "unset", and hides everything but the
+// dropdown.
 Column {
   id: group
 
@@ -20,7 +24,11 @@ Column {
 
   readonly property var fields: spec.fields || []
   readonly property var presets: spec.presets || []
+  readonly property bool hasPresets: presets.length > 0
   readonly property bool hasValue: value !== null && value !== undefined && typeof value === "object"
+  readonly property bool custom: !hasPresets || presetValue() === "custom"
+  readonly property bool hasAdvanced: fields.some(function(f) { return f.advanced === true })
+  property bool showAdvanced: false
 
   function clone(source) {
     return source === null || source === undefined ? null : JSON.parse(JSON.stringify(source))
@@ -38,11 +46,32 @@ Column {
     return out
   }
 
-  // Which preset the current value equals, or "custom".
+  // Preset comparison ignores `always` fields (the user's own toggles) and
+  // empty values, so a saved preset still reads as that preset.
+  function canonical(source) {
+    if (source === null || source === undefined || typeof source !== "object") return null
+    var out = {}
+    var keys = Object.keys(source).sort()
+    for (var i = 0; i < keys.length; i++) {
+      var key = keys[i]
+      var v = source[key]
+      if (v === null || v === undefined || v === "" || v === false) continue
+      if (Array.isArray(v) && v.length === 0) continue
+      if (isAlways(key)) continue
+      out[key] = v
+    }
+    return out
+  }
+
+  function isAlways(key) {
+    for (var i = 0; i < fields.length; i++) if (fields[i].key === key) return fields[i].always === true
+    return false
+  }
+
   function presetValue() {
-    var current = JSON.stringify(hasValue ? value : null)
+    var current = JSON.stringify(canonical(value))
     for (var i = 0; i < presets.length; i++) {
-      if (JSON.stringify(presets[i].value === undefined ? null : presets[i].value) === current) return String(i)
+      if (JSON.stringify(canonical(presets[i].value === undefined ? null : presets[i].value)) === current) return String(i)
     }
     return "custom"
   }
@@ -54,42 +83,74 @@ Column {
     return options
   }
 
+  // Applying a preset keeps the user's `always` fields as they were.
+  function applyPreset(next) {
+    if (next === "custom") {
+      changed(hasValue ? clone(value) : emptyObject())
+      return
+    }
+    var chosen = clone(presets[Number(next)].value)
+    if (chosen === null) {
+      changed(null)
+      return
+    }
+    for (var i = 0; i < fields.length; i++) {
+      var key = fields[i].key
+      if (fields[i].always === true && hasValue && value[key] !== undefined) chosen[key] = value[key]
+    }
+    changed(chosen)
+  }
+
+  function fieldVisible(f) {
+    if (!hasValue) return false
+    if (f.advanced === true && !showAdvanced) return false
+    if (f.always === true) return true
+    return custom
+  }
+
   width: parent ? parent.width : implicitWidth
   spacing: Style.spacing.sm
 
   Dropdown {
-    visible: group.presets.length > 0
+    visible: group.hasPresets
     width: parent.width
     showLabel: false
     options: group.presetOptions()
     value: group.presetValue()
     foreground: group.foreground
     fontFamily: group.fontFamily
-    onChanged: function(next) {
-      if (next === "custom") group.changed(group.hasValue ? group.clone(group.value) : group.emptyObject())
-      else group.changed(group.clone(group.presets[Number(next)].value))
+    onChanged: function(next) { group.applyPreset(next) }
+  }
+
+  Repeater {
+    model: group.fields
+
+    ScalarField {
+      required property var modelData
+      visible: group.fieldVisible(modelData)
+      spec: modelData
+      compact: true
+      showHelp: group.showHelp
+      value: group.hasValue ? group.value[modelData.key] : null
+      foreground: group.foreground
+      muted: group.muted
+      fontFamily: group.fontFamily
+      onChanged: function(next) { group.changed(group.withKey(group.value, modelData.key, next)) }
     }
   }
 
-  Column {
-    visible: group.hasValue || group.presets.length === 0
-    width: parent.width
-    spacing: Style.spacing.sm
+  // "More options" only when the group has advanced fields to reveal and is
+  // in a state where fields show at all.
+  Text {
+    visible: group.hasAdvanced && group.hasValue && (group.custom || group.fields.some(function(f) { return f.advanced === true && f.always === true }))
+    textFormat: Text.PlainText
+    text: group.showAdvanced ? "Fewer options" : "More options"
+    color: moreHover.hovered ? Color.accent : group.muted
+    font.family: group.fontFamily
+    font.pixelSize: Style.font.caption
+    font.underline: moreHover.hovered
 
-    Repeater {
-      model: group.fields
-
-      ScalarField {
-        required property var modelData
-        spec: modelData
-        compact: true
-        showHelp: group.showHelp
-        value: group.hasValue ? group.value[modelData.key] : null
-        foreground: group.foreground
-        muted: group.muted
-        fontFamily: group.fontFamily
-        onChanged: function(next) { group.changed(group.withKey(group.value, modelData.key, next)) }
-      }
-    }
+    HoverHandler { id: moreHover; cursorShape: Qt.PointingHandCursor }
+    TapHandler { onTapped: group.showAdvanced = !group.showAdvanced }
   }
 }

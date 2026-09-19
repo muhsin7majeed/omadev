@@ -304,6 +304,32 @@ def _short_name(value: Any, where: str) -> str:
     return name
 
 
+def derive_name(text: str) -> str:
+    """A tab-safe name made from a command: `docker compose up` -> `docker-compose-up`."""
+    slug = re.sub(r"[^A-Za-z0-9._]+", "-", text.strip()).strip("-._")[:32].rstrip("-._")
+    return slug if slug and NAME_PATTERN.match(slug) else "process"
+
+
+def derive_app_name(launch: tuple[str, ...]) -> str:
+    """An app name from its launch command: the program, or what an Omarchy
+    launcher is asked to launch (`omarchy-launch-tui lazydocker` -> `lazydocker`)."""
+    if launch and launch[0].startswith("omarchy-launch-") and len(launch) > 1:
+        candidate = next((part for part in launch[1:] if not part.startswith("-")), launch[1])
+    else:
+        candidate = launch[0] if launch else "app"
+    if "://" in candidate:
+        # A web app: host and path, without the scheme.
+        return derive_name(candidate.split("://", 1)[1])
+    return derive_name(Path(candidate).name or candidate)
+
+
+def _name_or_derived(data: dict[str, Any], where: str, fallback: str) -> str:
+    name = data.get("name")
+    if name is None or (isinstance(name, str) and not name.strip()):
+        return fallback
+    return _short_name(name, f"{where}.name")
+
+
 def _workspace(value: Any, where: str) -> int:
     number = _expect(value, where, int, "an integer")
     if not 1 <= number <= MAX_WORKSPACE:
@@ -322,13 +348,14 @@ def _env_list(value: Any, where: str) -> tuple[str, ...]:
 def _parse_command(raw: Any, where: str, warnings: list[str]) -> Command:
     data = _expect(raw, where, dict, "an object")
     _warn_unknown(data, _COMMAND_FIELDS, where, warnings)
-    if "name" not in data or "run" not in data:
-        raise ConfigError(where, "needs 'name' and 'run'")
+    if "run" not in data:
+        raise ConfigError(where, "needs 'run'")
+    run = _string(data["run"], f"{where}.run")
     port = data.get("port")
     cwd = data.get("cwd")
     return Command(
-        name=_short_name(data["name"], f"{where}.name"),
-        run=_string(data["run"], f"{where}.run"),
+        name=_name_or_derived(data, where, derive_name(run)),
+        run=run,
         port=None if port is None else _port(port, f"{where}.port"),
         cwd=None if cwd is None else _relative_dir(cwd, f"{where}.cwd"),
         env=_env_list(data.get("env", []), f"{where}.env"),
@@ -338,16 +365,17 @@ def _parse_command(raw: Any, where: str, warnings: list[str]) -> Command:
 def _parse_setup(raw: Any, where: str, warnings: list[str]) -> SetupCommand:
     data = _expect(raw, where, dict, "an object")
     _warn_unknown(data, _SETUP_FIELDS, where, warnings)
-    if "name" not in data or "run" not in data:
-        raise ConfigError(where, "needs 'name' and 'run'")
+    if "run" not in data:
+        raise ConfigError(where, "needs 'run'")
+    run = _string(data["run"], f"{where}.run")
     cwd = data.get("cwd")
     unless = data.get("unless_exists")
     timeout = _expect(data.get("timeout", DEFAULT_SETUP_TIMEOUT), f"{where}.timeout", int, "an integer")
     if not 1 <= timeout <= MAX_WAIT_TIMEOUT:
         raise ConfigError(f"{where}.timeout", f"must be between 1 and {MAX_WAIT_TIMEOUT} seconds")
     return SetupCommand(
-        name=_short_name(data["name"], f"{where}.name"),
-        run=_string(data["run"], f"{where}.run"),
+        name=_name_or_derived(data, where, derive_name(run)),
+        run=run,
         cwd=None if cwd is None else _relative_dir(cwd, f"{where}.cwd"),
         unless_exists=None if unless is None else _relative_dir(unless, f"{where}.unless_exists"),
         timeout=timeout,
@@ -388,7 +416,7 @@ def _parse_editor(raw: Any, where: str, warnings: list[str]) -> Editor:
 def _parse_app(raw: Any, where: str, warnings: list[str]) -> App:
     data = _expect(raw, where, dict, "an object")
     _warn_unknown(data, _APP_FIELDS, where, warnings)
-    for key in ("name", "launch", "match"):
+    for key in ("launch", "match"):
         if key not in data:
             raise ConfigError(where, f"needs '{key}'")
     launch = _string_list(data["launch"], f"{where}.launch")
@@ -396,7 +424,7 @@ def _parse_app(raw: Any, where: str, warnings: list[str]) -> App:
         raise ConfigError(f"{where}.launch", "must not be empty")
     workspace = data.get("workspace")
     return App(
-        name=_string(data["name"], f"{where}.name"),
+        name=_name_or_derived(data, where, derive_app_name(launch)),
         launch=launch,
         match=_regex(data["match"], f"{where}.match"),
         workspace=None if workspace is None else _workspace(workspace, f"{where}.workspace"),

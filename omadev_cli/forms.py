@@ -76,7 +76,7 @@ def _normalise_fields(data: dict[str, Any], fields: list[dict], where: str) -> d
                 continue              # unset; the validator applies the default or complains
             out[key] = value
             continue
-        if kind == "integer":
+        if kind in ("integer", "workspace"):
             value = _integer(value, here)
         elif kind == "argv":
             value = _argv(value, here)

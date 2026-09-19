@@ -70,6 +70,7 @@ Panel {
   // is the original name of the project being edited, or "" for a new one.
   // The form owns its draft (assigned, never bound, so its own edits stick).
   property var schemaFields: []
+  property var schemaSections: []
   property string formEditing: ""
   property string formError: ""
   property string formErrorKey: ""
@@ -213,6 +214,7 @@ Panel {
       return
     }
     schemaFields = data.fields
+    schemaSections = Array.isArray(data.sections) ? data.sections : []
     continueOpen()
   }
 
@@ -452,8 +454,8 @@ Panel {
     anchors.top: parent.top
     anchors.bottom: parent.bottom
     bar: root.bar
-    // U+F0D6E, the glyph Omarchy's own menu uses for "Development".
-    text: "󰵮"
+    // U+F14DE, nf-md-rocket-launch.
+    text: "󱓞"
     tooltipText: "Projects"
     onPressed: function(b) { root.toggle() }
   }
@@ -467,7 +469,8 @@ Panel {
     owner: root
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: popup.fittedContentWidth(Style.space(root.panelWidth))
+    // The form has nested rows and needs room; the list does not.
+    contentWidth: popup.fittedContentWidth(Style.space(root.view === "form" ? Math.max(root.panelWidth, 480) : root.panelWidth))
     contentHeight: popup.fittedContentHeight(content.implicitHeight)
 
     PanelKeyCatcher {
@@ -491,7 +494,7 @@ Panel {
           id: form
           visible: root.view === "form"
           width: parent.width
-          schema: root.schemaFields
+          sections: root.schemaSections
           title: root.formEditing === "" ? "New project" : "Edit " + root.formEditing
           editing: root.formEditing !== ""
           busy: root.formBusy

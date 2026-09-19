@@ -2,10 +2,11 @@ import QtQuick
 import qs.Commons
 import qs.Ui
 
-// Repeated rows for a `list` schema field: commands, apps, stop commands.
-// Each row is either one scalar input or a group of scalar inputs for an
-// object item. The Repeater is driven by the row count, not the array, so
-// typing in a row never rebuilds it and never loses focus.
+// Repeated rows for a `list` schema field: processes, setup commands, apps,
+// stop commands. Each row is either one scalar input or an ObjectFields
+// group for an object item, which brings presets and "More options" along.
+// The Repeater is driven by the row count, not the array, so typing in a
+// row never rebuilds it and never loses focus.
 Column {
   id: list
 
@@ -23,6 +24,7 @@ Column {
   readonly property bool objectRows: String(item.kind) === "object"
   readonly property var itemFields: item.fields || []
   readonly property color rowBorder: Qt.alpha(foreground, 0.18)
+  readonly property string singular: String(spec.label || "item").toLowerCase().replace(/es$/, "").replace(/s$/, "")
 
   function clone(source) {
     return JSON.parse(JSON.stringify(source))
@@ -39,12 +41,6 @@ Column {
     var copy = clone(items)
     copy[index] = next
     changed(copy)
-  }
-
-  function setKeyAt(index, key, next) {
-    var row = items[index] && typeof items[index] === "object" ? clone(items[index]) : emptyRow()
-    row[key] = next
-    setAt(index, row)
   }
 
   function removeAt(index) {
@@ -90,7 +86,7 @@ Column {
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
             textFormat: Text.PlainText
-            text: String(list.spec.label || "") + " " + (row.index + 1)
+            text: list.singular.charAt(0).toUpperCase() + list.singular.slice(1) + " " + (row.index + 1)
             color: list.muted
             font.family: list.fontFamily
             font.pixelSize: Style.font.caption
@@ -120,7 +116,7 @@ Column {
   }
 
   Button {
-    text: "Add " + String(list.spec.label || "item").toLowerCase().replace(/s$/, "")
+    text: "Add " + list.singular
     bordered: true
     foreground: list.foreground
     fontFamily: list.fontFamily
@@ -148,26 +144,14 @@ Column {
   Component {
     id: objectRow
 
-    Column {
-      id: fieldsColumn
-      spacing: Style.spacing.sm
-      readonly property int at: rowIndex
-
-      Repeater {
-        model: list.itemFields
-
-        ScalarField {
-          required property var modelData
-          spec: modelData
-          compact: true
-          showHelp: list.showHelp
-          value: list.items[fieldsColumn.at] ? list.items[fieldsColumn.at][modelData.key] : null
-          foreground: list.foreground
-          muted: list.muted
-          fontFamily: list.fontFamily
-          onChanged: function(next) { list.setKeyAt(fieldsColumn.at, modelData.key, next) }
-        }
-      }
+    ObjectFields {
+      spec: list.item
+      value: list.items[rowIndex]
+      showHelp: list.showHelp
+      foreground: list.foreground
+      muted: list.muted
+      fontFamily: list.fontFamily
+      onChanged: function(next) { list.setAt(rowIndex, next) }
     }
   }
 }

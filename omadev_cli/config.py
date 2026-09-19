@@ -37,7 +37,7 @@ _PROJECT_FIELDS = frozenset({
 })
 _COMMAND_FIELDS = frozenset({"name", "run", "port", "cwd"})
 _APP_FIELDS = frozenset({"name", "launch", "match"})
-_EDITOR_FIELDS = frozenset({"launch", "match"})
+_EDITOR_FIELDS = frozenset({"launch", "launch_shared", "match", "share_window"})
 _CONFIG_FIELDS = frozenset({"version", "default_browser", "projects"})
 
 
@@ -105,10 +105,24 @@ class Editor:
     the window class of an already open editor window. When `match` is unset
     the editor is launched every time and is trusted to reuse its own window,
     which Zed, VS Code and Cursor all do for an already open folder.
+
+    `share_window` opens the project inside the editor window that is
+    already open, alongside other projects, using `launch_shared` (for Zed,
+    VS Code and Cursor that is their `--add` flag). Stop then leaves the
+    window alone, since closing it would close the other projects too.
     """
 
     launch: tuple[str, ...]
     match: str | None = None
+    launch_shared: tuple[str, ...] | None = None
+    share_window: bool = False
+
+    @property
+    def launch_argv(self) -> tuple[str, ...]:
+        """The command Start uses, honouring `share_window` when it can."""
+        if self.share_window and self.launch_shared:
+            return self.launch_shared
+        return self.launch
 
 
 DEFAULT_EDITOR = Editor(launch=("omarchy-launch-editor", "{path}"))
@@ -268,7 +282,16 @@ def _parse_editor(raw: Any, where: str, warnings: list[str]) -> Editor:
     if not launch:
         raise ConfigError(f"{where}.launch", "must not be empty")
     match = data.get("match")
-    return Editor(launch=launch, match=None if match is None else _regex(match, f"{where}.match"))
+    shared = data.get("launch_shared")
+    share = data.get("share_window", False)
+    if not isinstance(share, bool):
+        raise ConfigError(f"{where}.share_window", "must be true or false")
+    return Editor(
+        launch=launch,
+        match=None if match is None else _regex(match, f"{where}.match"),
+        launch_shared=None if shared is None else _string_list(shared, f"{where}.launch_shared") or None,
+        share_window=share,
+    )
 
 
 def _parse_app(raw: Any, where: str, warnings: list[str]) -> App:
@@ -441,6 +464,10 @@ def project_to_dict(item: Project) -> dict[str, Any]:
         data: dict[str, Any] = {"launch": list(item.launch)}
         if item.match is not None:
             data["match"] = item.match
+        if item.launch_shared is not None:
+            data["launch_shared"] = list(item.launch_shared)
+        if item.share_window:
+            data["share_window"] = True
         return data
 
     data: dict[str, Any] = {

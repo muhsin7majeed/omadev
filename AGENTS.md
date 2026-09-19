@@ -144,7 +144,7 @@ then the classic form as fallback. Success is `ok` on stdout; dispatch errors
 exit 0 with a message, so the output is what is checked. The Lua API is
 documented in `/usr/share/hypr/stubs/hl.meta.lua`; window dispatchers live
 under `hl.dsp.window`, focus at the top level.
-| browser (webapp) | window class contains the URL host (Chromium app windows do) | `omarchy-launch-webapp`, else focus |
+| browser (webapp) | window class contains the URL host; verified: Brave gives `brave-localhost__-Default` for `http://localhost:3000` | `omarchy-launch-webapp`, else focus; Stop closes it |
 | browser (tab) | not detectable; opened only when the server was not already up | `xdg-open` |
 | editor | class matches `editor.match` and title has the folder name as a word | focus, else launch (`uwsm-app --` unless an `omarchy-*` launcher) |
 | apps | `match` regex over class and title | focus, else launch |
@@ -177,7 +177,7 @@ Per project:
 | `commands` | list of `{name, run, port?, cwd?}`; `cwd` is relative, inside the project |
 | `url` | http(s) URL to wait for and open |
 | `browser` | `webapp` or `browser`; overrides `default_browser` |
-| `editor` | `{launch: argv, match?: class regex}`; default is `omarchy-launch-editor {path}` |
+| `editor` | `{launch: argv, match?: class regex, launch_shared?: argv, share_window?: bool}`; default is `omarchy-launch-editor {path}`. With `share_window` Start uses `launch_shared` (Zed, VS Code, Cursor: `--add {path}`) to put the project into the open editor window, and Stop leaves that window alone |
 | `apps` | list of `{name, launch: argv, match: regex}` |
 | `stop_commands` | commands run on Stop (planned) |
 | `mode` | `sequential` (default) or `parallel` |

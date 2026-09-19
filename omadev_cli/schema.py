@@ -16,6 +16,7 @@ Field kinds the form knows how to render:
   regex    a regular expression
   argv     a command line; the form shows one string, the CLI splits it
   integer  a whole number within `min`..`max`
+  boolean  a toggle
   enum     one of `options` ({value, label})
   object   a group of `fields`; `presets` offer ready-made values
   list     repeated `item`s, each a scalar kind or an object with `fields`
@@ -61,6 +62,14 @@ APP_FIELDS = [
 EDITOR_FIELDS = [
     {"key": "launch", "kind": "argv", "label": "Launch command", "example": "zed {path}",
      "help": "How to open the project in the editor. {path} becomes the project folder."},
+    {"key": "share_window", "kind": "boolean", "label": "Open in the existing editor window",
+     "help": "Off: the project gets its own editor window, which Stop closes. On: the project is added "
+             "to the editor window that is already open, next to whatever else is open there, using the "
+             "shared launch command below. Stop then leaves that window alone, because closing it would "
+             "close the other projects too."},
+    {"key": "launch_shared", "kind": "argv", "label": "Shared launch command", "optional": True, "example": "zed --add {path}",
+     "help": "Used instead of the launch command when the toggle above is on. Zed, VS Code and Cursor all "
+             "take --add to put a folder into the current window. Empty falls back to the launch command."},
     {"key": "match", "kind": "regex", "label": "Window class match", "optional": True, "example": r"^dev\.zed\.Zed$",
      "help": "The editor's window class. Start focuses a window with this class whose title contains the "
              "project folder name; Stop closes it. Leave empty to launch every time and let the editor "
@@ -69,9 +78,14 @@ EDITOR_FIELDS = [
 
 EDITOR_PRESETS = [
     {"label": "Omarchy default editor", "value": None},
-    {"label": "Zed", "value": {"launch": ["zed", "{path}"], "match": r"^dev\.zed\.Zed$"}},
-    {"label": "VS Code", "value": {"launch": ["code", "{path}"], "match": r"^(code|Code)"}},
-    {"label": "Cursor", "value": {"launch": ["cursor", "{path}"], "match": r"^(cursor|Cursor)"}},
+    {"label": "Zed", "value": {"launch": ["zed", "{path}"], "launch_shared": ["zed", "--add", "{path}"],
+                               "match": r"^dev\.zed\.Zed$", "share_window": False}},
+    {"label": "Zed, one shared window", "value": {"launch": ["zed", "{path}"], "launch_shared": ["zed", "--add", "{path}"],
+                                                  "match": r"^dev\.zed\.Zed$", "share_window": True}},
+    {"label": "VS Code", "value": {"launch": ["code", "{path}"], "launch_shared": ["code", "--add", "{path}"],
+                                   "match": r"^(code|Code)", "share_window": False}},
+    {"label": "Cursor", "value": {"launch": ["cursor", "{path}"], "launch_shared": ["cursor", "--add", "{path}"],
+                                  "match": r"^(cursor|Cursor)", "share_window": False}},
 ]
 
 PROJECT_FIELDS = [

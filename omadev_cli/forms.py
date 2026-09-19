@@ -34,6 +34,18 @@ def _integer(value: Any, where: str) -> Any:
     return value
 
 
+def _boolean(value: Any, where: str) -> Any:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("true", "on", "yes", "1"):
+            return True
+        if text in ("false", "off", "no", "0"):
+            return False
+    raise cfg.ConfigError(where, "must be true or false")
+
+
 def _argv(value: Any, where: str) -> Any:
     if isinstance(value, str):
         try:
@@ -53,19 +65,25 @@ def _normalise_fields(data: dict[str, Any], fields: list[dict], where: str) -> d
         if spec is None:
             out[key] = value          # left for the validator to warn about
             continue
+        kind = spec["kind"]
+        if kind == "boolean":
+            if value is None or value == "":
+                continue              # unset; the validator applies the default
+            out[key] = _boolean(value, here)
+            continue
         if _empty(value):
-            if spec.get("optional") or spec["kind"] == "list":
+            if spec.get("optional") or kind == "list":
                 continue              # unset; the validator applies the default or complains
             out[key] = value
             continue
-        kind = spec["kind"]
         if kind == "integer":
             value = _integer(value, here)
         elif kind == "argv":
             value = _argv(value, here)
         elif kind == "object" and isinstance(value, dict):
             value = _normalise_fields(value, spec["fields"], here)
-            if all(_empty(v) for v in value.values()):
+            # A group with nothing but an untouched toggle is an unset group.
+            if all(_empty(v) or v is False for v in value.values()):
                 continue
         elif kind == "list" and isinstance(value, list):
             item = spec["item"]

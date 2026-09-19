@@ -252,6 +252,15 @@ class StartTests(unittest.TestCase):
         self.assertIn("not starting a second server", results["command:app"].detail)
         self.assertEqual(results["wait"].status, steps.SKIPPED)
 
+    def test_shared_editor_window_uses_add_and_is_not_focused_away(self) -> None:
+        self.everything_running()
+        self.fake.windows = [w for w in self.fake.windows if w.cls != "dev.zed.Zed"]
+        editor = {"launch": ["zed", "{path}"], "launch_shared": ["zed", "--add", "{path}"],
+                  "match": r"^dev\.zed\.Zed$", "share_window": True}
+        results = self.start(kadha(self.path, editor=editor))
+        self.assertEqual(results["editor"].status, steps.STARTED)
+        self.assertIn(("uwsm-app", "--", "zed", "--add", str(self.path)), self.runner.detached)
+
     def test_webapp_mode_focuses_app_window(self) -> None:
         self.everything_running()
         self.fake.windows.append(window(address="0xf", cls="brave-localhost__-Default", title="Kadha", pid=9))
@@ -364,6 +373,16 @@ class StopTests(unittest.TestCase):
         self.assertEqual(results["command:app"].status, steps.STOPPED)
         self.assertIn("close idle tab", results["command:app"].detail)
         self.assertNotIn(("herdr", "pane", "send-keys", "w5:p9", "ctrl+c"), self.runner.calls)
+
+    def test_stop_leaves_a_shared_editor_window_open(self) -> None:
+        self.running_project()
+        editor = {"launch": ["zed", "{path}"], "launch_shared": ["zed", "--add", "{path}"],
+                  "match": r"^dev\.zed\.Zed$", "share_window": True}
+        results = self.stop(kadha(self.path, editor=editor))
+        self.assertEqual(results["editor"].status, steps.SKIPPED)
+        self.assertIn("shared", results["editor"].detail)
+        closes = [c[2] for c in self.runner.calls if c[:2] == ("hyprctl", "dispatch")]
+        self.assertNotIn('hl.dsp.window.close({ window = "address:0xa" })', closes)
 
     def test_stop_webapp_window_is_closed(self) -> None:
         self.running_project()

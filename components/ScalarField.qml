@@ -43,7 +43,9 @@ Column {
   width: parent ? parent.width : implicitWidth
   spacing: Style.spacing.xs
 
+  // A boolean draws its own label inside the toggle row.
   Row {
+    visible: field.kind !== "boolean"
     spacing: Style.spacing.sm
 
     Text {
@@ -76,7 +78,7 @@ Column {
 
   Loader {
     width: parent.width
-    sourceComponent: field.kind === "enum" ? enumInput : textInput
+    sourceComponent: field.kind === "enum" ? enumInput : (field.kind === "boolean" ? booleanInput : textInput)
   }
 
   Text {
@@ -103,6 +105,32 @@ Column {
       foreground: field.foreground
       inputMethodHints: field.kind === "integer" ? Qt.ImhDigitsOnly : Qt.ImhNone
       onTextEdited: field.changed(text)
+    }
+  }
+
+  Component {
+    id: booleanInput
+
+    Row {
+      width: field.width
+      spacing: Style.spacing.sm
+
+      Toggle {
+        label: field.label
+        checked: field.value === true
+        foreground: field.foreground
+        fontFamily: field.fontFamily
+        titleSize: field.compact ? Style.font.caption : Style.font.bodySmall
+        onClicked: field.changed(!(field.value === true))
+      }
+
+      HelpHint {
+        visible: field.help !== "" && !field.showHelp
+        anchors.verticalCenter: parent.verticalCenter
+        text: field.help
+        foreground: field.foreground
+        fontFamily: field.fontFamily
+      }
     }
   }
 

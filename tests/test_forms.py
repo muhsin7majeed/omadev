@@ -37,11 +37,13 @@ class SchemaParityTests(unittest.TestCase):
 
     def test_every_field_has_the_shape_the_form_needs(self) -> None:
         text_kinds = {"string", "path", "url", "regex", "argv", "integer"}
+        known_kinds = text_kinds | {"boolean", "enum", "object", "list"}
 
         def check(fields: list[dict], where: str) -> None:
             for field in fields:
                 here = f"{where}.{field['key']}"
                 self.assertIn("kind", field, here)
+                self.assertIn(field["kind"], known_kinds, here)
                 self.assertIn("label", field, here)
                 self.assertTrue(field.get("help", "").strip(), f"{here} needs help text")
                 if field["kind"] in text_kinds:
@@ -105,6 +107,21 @@ class NormaliseTests(unittest.TestCase):
         self.assertIsNone(project.effective_editor.match)
         self.assertEqual(project.apps[0].launch, ("omarchy-launch-tui", "lazydocker"))
         self.assertEqual(project.stop_commands, ("docker compose down",))
+
+    def test_boolean_from_form(self) -> None:
+        for raw, expected in (("true", True), ("false", False), (True, True), ("on", True), ("0", False)):
+            with self.subTest(raw=raw):
+                project, _ = forms.project_from_form({"name": "demo", "path": self.dir,
+                                                      "editor": {"launch": "zed {path}", "share_window": raw}})
+                self.assertEqual(project.effective_editor.share_window, expected)
+        with self.assertRaises(cfg.ConfigError) as ctx:
+            forms.project_from_form({"name": "demo", "path": self.dir, "editor": {"launch": "zed", "share_window": "maybe"}})
+        self.assertEqual(ctx.exception.where, "editor.share_window")
+
+    def test_editor_with_only_the_toggle_off_is_unset(self) -> None:
+        project, _ = forms.project_from_form({"name": "demo", "path": self.dir,
+                                              "editor": {"launch": "", "launch_shared": "", "match": "", "share_window": False}})
+        self.assertIsNone(project.editor)
 
     def test_empty_editor_means_default(self) -> None:
         project, _ = forms.project_from_form({"name": "demo", "path": self.dir, "editor": {"launch": "", "match": ""}})

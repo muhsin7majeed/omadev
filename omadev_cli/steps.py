@@ -459,7 +459,7 @@ class StartRun(Run):
     def open_editor(self) -> None:
         step = "editor"
         editor = self.project.effective_editor
-        argv = [fill(part, self.project) for part in editor.launch]
+        argv = [fill(part, self.project) for part in editor.launch_argv]
         try:
             window = self.editor_window()
             if window is not None:
@@ -587,7 +587,11 @@ class StopRun(Run):
 
     def close_editor(self) -> None:
         step = "editor"
-        if self.project.effective_editor.match is None:
+        editor = self.project.effective_editor
+        if editor.share_window:
+            self.record(step, SKIPPED, "editor window is shared with other projects; left open")
+            return
+        if editor.match is None:
             self.record(step, SKIPPED, "editor has no window match; left open")
             return
         try:

@@ -90,11 +90,14 @@ def cmd_validate(args: argparse.Namespace) -> Result:
 
 def cmd_status(args: argparse.Namespace) -> Result:
     """Read-only snapshot of what is up for one or every project."""
-    config = cfg.load(args.file or cfg.projects_file(), check_paths=False)
+    path = args.file or cfg.projects_file()
+    config = cfg.load(path, check_paths=False)
     projects = [_project_named(config, args.project)] if args.project else list(config.projects)
     services = args.services_factory()
     return {
         "ok": True,
+        "file": str(path),
+        "exists": path.exists(),
         "projects": [steps.status(p, config, services) for p in projects],
         "warnings": list(config.warnings),
     }, EXIT_OK

@@ -71,7 +71,16 @@ class CliTests(unittest.TestCase):
         self.write({"version": 1, "projects": [{"name": "demo", "path": str(self.dir)}]})
         code, out, _ = self.run_cli("status", "--json", "--file", str(self.file), services=fake)
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out)["projects"][0]["workspace"]["present"], False)
+        result = json.loads(out)
+        self.assertTrue(result["exists"])
+        self.assertEqual(result["projects"][0]["workspace"]["present"], False)
+
+    def test_status_json_without_file(self) -> None:
+        code, out, _ = self.run_cli("status", "--json", "--file", str(self.file))
+        self.assertEqual(code, 0)
+        result = json.loads(out)
+        self.assertFalse(result["exists"])
+        self.assertEqual(result["projects"], [])
 
     def write(self, data: object) -> None:
         self.file.write_text(json.dumps(data), encoding="utf-8")

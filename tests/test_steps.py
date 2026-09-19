@@ -442,6 +442,8 @@ class StatusTests(unittest.TestCase):
             config = kadha(path)
             snapshot = steps.status(config.projects[0], config, fake.build())
         self.assertEqual(snapshot["workspace"], {"present": True, "id": "w5"})
+        self.assertEqual(snapshot["path"], str(path))
+        self.assertEqual(snapshot["browser"], "browser")
         command = snapshot["commands"][0]
         self.assertEqual((command["name"], command["port"], command["listening"], command["owner"]), ("app", 3000, True, "project"))
         self.assertTrue(snapshot["url"]["reachable"])

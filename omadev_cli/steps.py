@@ -674,7 +674,12 @@ def succeeded(results: list[StepResult]) -> bool:
 
 def status(project: Project, config: Config, services: Services) -> dict:
     """A read-only snapshot: what of this project is up right now."""
-    snapshot: dict = {"name": project.name, "multiplexer": project.multiplexer}
+    snapshot: dict = {
+        "name": project.name,
+        "path": str(project.path),
+        "multiplexer": project.multiplexer,
+        "browser": config.browser_for(project),
+    }
 
     try:
         if project.multiplexer == "herdr":

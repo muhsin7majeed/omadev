@@ -40,7 +40,7 @@ focused where it is and never moved.
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/<owner>/omadev.git
+omarchy plugin add https://github.com/muhsin7majeed/omadev.git
 omarchy plugin enable potato.omadev
 ```
 

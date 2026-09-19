@@ -31,19 +31,27 @@ from urllib.parse import urlsplit
 from . import hypr, ports
 from .config import Config, Project, url_port
 from .herdr import Herdr, HerdrError, attach_argv as herdr_attach_argv, client_pids as herdr_client_pids, tab_label
-from .system import Runner, SystemRunner, ToolMissing, gui_argv, list_processes, port_open, wait_for_port
+from .system import Runner, SystemRunner, ToolMissing, gui_argv, http_ok, list_processes, port_open, split_command, wait_for_http
 from .tmux import Tmux, TmuxError, attach_argv as tmux_attach_argv, session_name, window_name
 
 SKIPPED = "skipped"
 STARTED = "started"
 FOCUSED = "focused"
+STOPPED = "stopped"
 FAILED = "failed"
 PLANNED = "planned"
 
 LOCAL_HOST = "localhost"
 SERVER_START_TIMEOUT = 15.0
+HERDR_INTERRUPT = "ctrl+c"
+TMUX_INTERRUPT = "C-c"
 
-StepError = (HerdrError, TmuxError, hypr.HyprError, ToolMissing, OSError)
+
+class StepFailure(Exception):
+    """A step could not do what it set out to do."""
+
+
+StepError = (HerdrError, TmuxError, hypr.HyprError, ToolMissing, OSError, StepFailure)
 
 
 @dataclass(frozen=True)
@@ -64,7 +72,8 @@ class Services:
     herdr: Herdr
     tmux: Tmux
     probe: Callable[[str, int], bool]
-    wait: Callable[[str, int, float], bool]
+    http_ok: Callable[[str], bool]
+    wait_url: Callable[[str, float], bool]
     processes: Callable[[], list[tuple[int, list[str]]]]
     windows: Callable[[], list[hypr.Window]]
     listener: Callable[[int], ports.Listener | None]
@@ -81,7 +90,8 @@ class Services:
             herdr=Herdr(runner),
             tmux=Tmux(runner),
             probe=port_open,
-            wait=wait_for_port,
+            http_ok=http_ok,
+            wait_url=wait_for_http,
             processes=list_processes,
             windows=lambda: hypr.clients(runner),
             listener=lambda port: ports.listener(runner, port),
@@ -122,7 +132,9 @@ def fill(text: str, project: Project) -> str:
     return text.replace("{path}", str(project.path)).replace("{name}", project.name)
 
 
-class StartRun:
+class Run:
+    """Shared machinery for Start and Stop: recording, dry run, windows."""
+
     def __init__(self, project: Project, config: Config, services: Services, *, dry_run: bool) -> None:
         self.project = project
         self.config = config
@@ -131,9 +143,6 @@ class StartRun:
         self.results: list[StepResult] = []
         self._windows: list[hypr.Window] | None = None
         self.ports = PortInspector(project, services)
-        # Set when the URL's port belongs to another project: the browser
-        # must not open there, not even in a dry run's plan.
-        self.url_blocked = False
 
     # ------------------------------------------------------------- recording
 
@@ -143,7 +152,10 @@ class StartRun:
         return result
 
     def act(self, step: str, detail: str, action: Callable[[], None], *, status: str = STARTED) -> bool:
-        """Perform `action` unless dry-running; record the outcome."""
+        """Perform `action` unless dry-running; record the outcome.
+
+        Details are imperative ("create tab …"); the status carries the tense.
+        """
         if self.dry_run:
             self.record(step, PLANNED, detail)
             return True
@@ -161,8 +173,61 @@ class StartRun:
         return self._windows
 
     def focus(self, step: str, window: hypr.Window, what: str) -> bool:
-        # Details are imperative ("focus X"); the status carries the tense.
         return self.act(step, f"focus {what} ({window.label})", lambda: hypr.focus(self.s.runner, window), status=FOCUSED)
+
+    def close_window(self, step: str, window: hypr.Window, what: str) -> bool:
+        return self.act(step, f"close {what} ({window.label})", lambda: hypr.close(self.s.runner, window), status=STOPPED)
+
+    def wait_until(self, condition: Callable[[], bool], timeout: float) -> bool:
+        deadline = self.s.clock() + timeout
+        while not condition():
+            if self.s.clock() >= deadline:
+                return False
+            self.s.sleep(0.5)
+        return True
+
+    # ------------------------------------------------------------- lookups
+
+    def find_session(self) -> Session | None:
+        """The project's existing workspace or session, without creating it."""
+        if self.project.multiplexer == "herdr":
+            herdr = self.s.herdr
+            if not herdr.available() or not herdr.server_running():
+                return None
+            workspace = herdr.find_workspace(self.project.session_name)
+            return Session("herdr", workspace.id, created=False) if workspace else None
+        name = session_name(self.project.session_name)
+        if self.s.tmux.available() and self.s.tmux.has_session(name):
+            return Session("tmux", name, created=False)
+        return None
+
+    def editor_window(self) -> hypr.Window | None:
+        editor = self.project.effective_editor
+        if editor.match is None:
+            return None
+        pattern = fill(editor.match, self.project)
+        folder = self.project.path.name
+        return hypr.first(self.windows(), lambda w: hypr.class_matches(w, pattern) and hypr.title_has_word(w, folder))
+
+    def app_window(self, app) -> hypr.Window | None:
+        pattern = fill(app.match, self.project)
+        return hypr.first(self.windows(), lambda w: hypr.matches(w, pattern))
+
+    def webapp_window(self) -> hypr.Window | None:
+        # Chromium-family app windows carry the URL host in their window
+        # class, e.g. "brave-localhost__-Default"; ordinary browser windows
+        # are just "brave-browser".
+        host = urlsplit(self.project.url or "").hostname or LOCAL_HOST
+        pattern = r"^(brave|chrom|google-chrome|microsoft-edge|vivaldi|opera|helium).*" + re.escape(host)
+        return hypr.first(self.windows(), lambda w: hypr.class_matches(w, pattern))
+
+
+class StartRun(Run):
+    def __init__(self, project: Project, config: Config, services: Services, *, dry_run: bool) -> None:
+        super().__init__(project, config, services, dry_run=dry_run)
+        # Set when the URL's port belongs to another project: the browser
+        # must not open there, not even in a dry run's plan.
+        self.url_blocked = False
 
     # ------------------------------------------------------------ workspace
 
@@ -190,7 +255,7 @@ class StartRun:
             if self.dry_run:
                 self.record(step, PLANNED, f"create herdr workspace '{label}' at {self.project.path}")
                 return Session("herdr", "(new)", created=True)
-            if not self._wait_for(herdr.server_running, SERVER_START_TIMEOUT):
+            if not self.wait_until(herdr.server_running, SERVER_START_TIMEOUT):
                 self.record(step, FAILED, f"herdr server did not come up within {SERVER_START_TIMEOUT:g}s")
                 return None
         workspace = herdr.find_workspace(label)
@@ -219,14 +284,6 @@ class StartRun:
         if not self.act(step, f"create tmux session '{name}' at {self.project.path}", lambda: tmux.new_session(name, self.project.path)):
             return None
         return Session("tmux", name, created=True)
-
-    def _wait_for(self, condition: Callable[[], bool], timeout: float) -> bool:
-        deadline = self.s.clock() + timeout
-        while not condition():
-            if self.s.clock() >= deadline:
-                return False
-            self.s.sleep(0.5)
-        return True
 
     # ------------------------------------------------------------- commands
 
@@ -329,7 +386,12 @@ class StartRun:
     # ------------------------------------------------------------------ url
 
     def wait_for_url(self) -> tuple[bool, bool]:
-        """Returns (reachable now, was already reachable before this run)."""
+        """Returns (responding now, was already responding before this run).
+
+        "Responding" means an HTTP answer, not merely an open port: docker
+        binds the port the moment a container starts, before the app inside
+        is ready.
+        """
         step = "wait"
         url = self.project.url
         if url is None:
@@ -337,26 +399,28 @@ class StartRun:
             return False, False
         host = urlsplit(url).hostname or LOCAL_HOST
         port = url_port(url)
-        if self.s.probe(host, port):
-            if ports.is_local_host(host):
-                state = self.ports.state(port)
-                if state.owner == ports.OTHER:
-                    self.url_blocked = True
-                    self.record(step, FAILED, f"{host}:{port} is served by {state.detail}, not by this project")
-                    return False, False
-                self.record(step, SKIPPED, f"{host}:{port} is already reachable ({state.detail})")
-            else:
-                self.record(step, SKIPPED, f"{host}:{port} is already reachable")
+        listening = self.s.probe(host, port)
+        owner = ""
+        if listening and ports.is_local_host(host):
+            state = self.ports.state(port)
+            if state.owner == ports.OTHER:
+                self.url_blocked = True
+                self.record(step, FAILED, f"{host}:{port} is served by {state.detail}, not by this project")
+                return False, False
+            owner = f" ({state.detail})"
+        if listening and self.s.http_ok(url):
+            self.record(step, SKIPPED, f"{url} already responds{owner}")
             return True, True
         timeout = self.project.wait_timeout
         if self.dry_run:
-            self.record(step, PLANNED, f"wait up to {timeout}s for {host}:{port}")
+            self.record(step, PLANNED, f"wait up to {timeout}s for {url} to respond")
             return False, False
         started = self.s.clock()
-        if self.s.wait(host, port, float(timeout)):
-            self.record(step, STARTED, f"{host}:{port} reachable after {self.s.clock() - started:.1f}s")
+        if self.s.wait_url(url, float(timeout)):
+            self.record(step, STARTED, f"{url} responds after {self.s.clock() - started:.1f}s")
             return True, False
-        self.record(step, FAILED, f"{host}:{port} not reachable after {timeout}s")
+        why = "port is open but nothing answers HTTP" if self.s.probe(host, port) else "nothing is listening"
+        self.record(step, FAILED, f"{url} did not respond within {timeout}s ({why})")
         return False, False
 
     def open_browser(self, reachable: bool, was_up: bool) -> None:
@@ -371,12 +435,7 @@ class StartRun:
         mode = self.config.browser_for(self.project)
         try:
             if mode == "webapp":
-                host = urlsplit(url).hostname or LOCAL_HOST
-                # Chromium-family app windows carry the URL host in their
-                # window class, e.g. "brave-localhost__-Default"; ordinary
-                # browser windows are just "brave-browser".
-                pattern = r"^(brave|chrom|google-chrome|microsoft-edge|vivaldi|opera|helium).*" + re.escape(host)
-                window = hypr.first(self.windows(), lambda w: hypr.class_matches(w, pattern))
+                window = self.webapp_window()
                 if window is not None:
                     self.focus(step, window, "web app window")
                     return
@@ -401,14 +460,11 @@ class StartRun:
         step = "editor"
         editor = self.project.effective_editor
         argv = [fill(part, self.project) for part in editor.launch]
-        folder = self.project.path.name
         try:
-            if editor.match is not None:
-                pattern = fill(editor.match, self.project)
-                window = hypr.first(self.windows(), lambda w: hypr.class_matches(w, pattern) and hypr.title_has_word(w, folder))
-                if window is not None:
-                    self.focus(step, window, "editor")
-                    return
+            window = self.editor_window()
+            if window is not None:
+                self.focus(step, window, "editor")
+                return
             self.act(step, f"open editor: {' '.join(argv)}", lambda: self.s.runner.detach(gui_argv(self.s.runner, argv), cwd=self.project.path))
         except StepError as exc:
             self.record(step, FAILED, str(exc))
@@ -417,15 +473,183 @@ class StartRun:
         for app in self.project.apps:
             step = f"app:{app.name}"
             argv = [fill(part, self.project) for part in app.launch]
-            pattern = fill(app.match, self.project)
             try:
-                window = hypr.first(self.windows(), lambda w: hypr.matches(w, pattern))
+                window = self.app_window(app)
                 if window is not None:
                     self.focus(step, window, app.name)
                     continue
                 self.act(step, f"open {app.name}: {' '.join(argv)}", lambda: self.s.runner.detach(gui_argv(self.s.runner, argv), cwd=self.project.path))
             except StepError as exc:
                 self.record(step, FAILED, str(exc))
+
+
+class StopRun(Run):
+    """Tear down what Start brought up, in reverse, leaving the rest alone.
+
+    The workspace or session and the terminal stay: the user's own panes live
+    there. Browser tabs stay because one cannot be told from another; a web
+    app window is closed because it can.
+    """
+
+    # ------------------------------------------------------------- commands
+
+    def stop_commands(self, session: Session | None) -> None:
+        for command in reversed(self.project.commands):
+            step = f"command:{command.name}"
+            if session is None:
+                self.record(step, SKIPPED, "no workspace, nothing to stop")
+                continue
+            try:
+                if session.kind == "herdr":
+                    self._stop_in_herdr(step, command, session)
+                else:
+                    self._stop_in_tmux(step, command, session)
+            except StepError as exc:
+                self.record(step, FAILED, str(exc))
+
+    def _port_closed(self, port: int | None) -> bool:
+        return port is None or not self.s.probe(LOCAL_HOST, port)
+
+    def _stop_in_herdr(self, step: str, command, session: Session) -> None:
+        herdr = self.s.herdr
+        label = tab_label(command.name)
+        tab = herdr.find_tab(session.id, label)
+        if tab is None:
+            self.record(step, SKIPPED, f"no tab '{label}'")
+            return
+        pane = herdr.first_pane(session.id, tab.id)
+        if pane is None:
+            self.act(step, f"close empty tab '{label}'", lambda: herdr.close_tab(tab.id), status=STOPPED)
+            return
+        foreground = herdr.foreground(pane.id)
+        if foreground.idle:
+            self.act(step, f"close idle tab '{label}'", lambda: herdr.close_tab(tab.id), status=STOPPED)
+            return
+        timeout = self.project.wait_timeout
+
+        def interrupt_and_close() -> None:
+            herdr.send_keys(pane.id, HERDR_INTERRUPT)
+            settled = self.wait_until(lambda: herdr.foreground(pane.id).idle and self._port_closed(command.port), timeout)
+            if not settled:
+                raise StepFailure(f"still running after {timeout}s; tab left open")
+            herdr.close_tab(tab.id)
+
+        waiting = f", wait for port {command.port} to close" if command.port is not None else ""
+        self.act(step, f"interrupt {foreground.summary}{waiting}, close tab '{label}'", interrupt_and_close, status=STOPPED)
+
+    def _stop_in_tmux(self, step: str, command, session: Session) -> None:
+        tmux = self.s.tmux
+        name = window_name(command.name)
+        target = tmux.find_window(session.id, name)
+        if target is None:
+            self.record(step, SKIPPED, f"no window '{name}'")
+            return
+        if tmux.idle(target):
+            self.act(step, f"close idle window '{name}'", lambda: tmux.kill_window(target), status=STOPPED)
+            return
+        running = tmux.current_command(target)
+        timeout = self.project.wait_timeout
+
+        def interrupt_and_close() -> None:
+            tmux.send_keys(target, TMUX_INTERRUPT)
+            settled = self.wait_until(lambda: tmux.idle(target) and self._port_closed(command.port), timeout)
+            if not settled:
+                raise StepFailure(f"still running after {timeout}s; window left open")
+            tmux.kill_window(target)
+
+        waiting = f", wait for port {command.port} to close" if command.port is not None else ""
+        self.act(step, f"interrupt {running}{waiting}, close window '{name}'", interrupt_and_close, status=STOPPED)
+
+    # -------------------------------------------------------- stop_commands
+
+    def run_stop_commands(self) -> None:
+        """Project-declared cleanup, run directly in the project directory.
+
+        Parsed like a POSIX shell would, but never through one: quoting
+        works, pipes and variables do not.
+        """
+        for index, text in enumerate(self.project.stop_commands, start=1):
+            step = f"stop:{index}"
+            try:
+                argv = split_command(text)
+            except ValueError as exc:
+                self.record(step, FAILED, f"'{text}': {exc}")
+                continue
+
+            def run(argv: list[str] = argv) -> None:
+                result = self.s.runner.run(argv, timeout=float(self.project.wait_timeout), cwd=self.project.path)
+                if not result.ok:
+                    raise StepFailure(result.message)
+
+            self.act(step, f"run '{text}' in {self.project.path}", run, status=STOPPED)
+
+    # ------------------------------------------------------------- windows
+
+    def close_editor(self) -> None:
+        step = "editor"
+        if self.project.effective_editor.match is None:
+            self.record(step, SKIPPED, "editor has no window match; left open")
+            return
+        try:
+            window = self.editor_window()
+        except StepError as exc:
+            self.record(step, FAILED, str(exc))
+            return
+        if window is None:
+            self.record(step, SKIPPED, "no editor window for this project")
+            return
+        self.close_window(step, window, "editor")
+
+    def close_apps(self) -> None:
+        for app in self.project.apps:
+            step = f"app:{app.name}"
+            try:
+                window = self.app_window(app)
+            except StepError as exc:
+                self.record(step, FAILED, str(exc))
+                continue
+            if window is None:
+                self.record(step, SKIPPED, f"no {app.name} window")
+                continue
+            self.close_window(step, window, app.name)
+
+    def close_browser(self) -> None:
+        step = "browser"
+        if self.project.url is None:
+            self.record(step, SKIPPED, "no url configured")
+            return
+        if self.config.browser_for(self.project) != "webapp":
+            self.record(step, SKIPPED, "browser tab left open; a tab cannot be told from the others")
+            return
+        try:
+            window = self.webapp_window()
+        except StepError as exc:
+            self.record(step, FAILED, str(exc))
+            return
+        if window is None:
+            self.record(step, SKIPPED, "no web app window open")
+            return
+        self.close_window(step, window, "web app window")
+
+
+def stop(project: Project, config: Config, services: Services, *, dry_run: bool = False) -> list[StepResult]:
+    run = StopRun(project, config, services, dry_run=dry_run)
+    try:
+        session = run.find_session()
+    except StepError as exc:
+        run.record("workspace", FAILED, str(exc))
+        session = None
+    else:
+        if session is None:
+            run.record("workspace", SKIPPED, f"no {project.multiplexer} workspace '{project.session_name}'")
+        else:
+            run.record("workspace", SKIPPED, f"{project.multiplexer} workspace '{project.session_name}' left in place ({session.id})")
+    run.stop_commands(session)
+    run.run_stop_commands()
+    run.close_apps()
+    run.close_editor()
+    run.close_browser()
+    return run.results
 
 
 def start(project: Project, config: Config, services: Services, *, dry_run: bool = False) -> list[StepResult]:
@@ -473,28 +697,21 @@ def status(project: Project, config: Config, services: Services) -> dict:
     if project.url is not None:
         host = urlsplit(project.url).hostname or LOCAL_HOST
         port = url_port(project.url)
-        entry = {"value": project.url, "reachable": services.probe(host, port), "owner": None, "detail": None}
-        if entry["reachable"] and ports.is_local_host(host):
+        listening = services.probe(host, port)
+        entry = {"value": project.url, "reachable": listening and services.http_ok(project.url), "listening": listening, "owner": None, "detail": None}
+        if listening and ports.is_local_host(host):
             state = inspector.state(port)
             entry.update({"owner": state.owner, "detail": state.detail})
         snapshot["url"] = entry
     else:
         snapshot["url"] = None
 
+    lookup = Run(project, config, services, dry_run=True)
     try:
-        windows = services.windows()
+        lookup.windows()
     except StepError as exc:
         snapshot["windows_error"] = str(exc)
-        windows = []
-    editor = project.effective_editor
-    folder = project.path.name
-    if editor.match is not None:
-        pattern = fill(editor.match, project)
-        snapshot["editor_open"] = hypr.first(windows, lambda w: hypr.class_matches(w, pattern) and hypr.title_has_word(w, folder)) is not None
-    else:
-        snapshot["editor_open"] = None
-    snapshot["apps"] = [
-        {"name": a.name, "open": hypr.first(windows, lambda w, p=fill(a.match, project): hypr.matches(w, p)) is not None}
-        for a in project.apps
-    ]
+        lookup._windows = []
+    snapshot["editor_open"] = None if project.effective_editor.match is None else lookup.editor_window() is not None
+    snapshot["apps"] = [{"name": a.name, "open": lookup.app_window(a) is not None} for a in project.apps]
     return snapshot

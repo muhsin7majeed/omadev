@@ -40,6 +40,46 @@ class PortTests(unittest.TestCase):
         self.assertFalse(system.wait_for_port("h", 1, 1.0, interval=0.5, probe=probe, clock=lambda: clock["t"], sleep=sleep))
 
 
+class HttpTests(unittest.TestCase):
+    def test_http_ok_needs_an_http_answer_not_just_a_port(self) -> None:
+        import http.server
+        import threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                self.send_response(503)
+                self.end_headers()
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            # An error status still counts: the app is answering.
+            self.assertTrue(system.http_ok(f"http://127.0.0.1:{port}/"))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        # A bare listening socket that never speaks HTTP is not "responding".
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            silent = listener.getsockname()[1]
+            self.assertTrue(system.port_open("127.0.0.1", silent))
+            self.assertFalse(system.http_ok(f"http://127.0.0.1:{silent}/", timeout=0.3))
+        self.assertFalse(system.http_ok(f"http://127.0.0.1:{silent}/", timeout=0.3))
+
+    def test_split_command(self) -> None:
+        self.assertEqual(system.split_command("docker compose down"), ["docker", "compose", "down"])
+        self.assertEqual(system.split_command("echo 'a b' c"), ["echo", "a b", "c"])
+        with self.assertRaises(ValueError):
+            system.split_command("   ")
+
+
 class ProcTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()

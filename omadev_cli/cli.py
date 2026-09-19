@@ -100,16 +100,16 @@ def cmd_status(args: argparse.Namespace) -> Result:
     }, EXIT_OK
 
 
-def cmd_start(args: argparse.Namespace) -> Result:
-    """Bring a project up; every step is check-then-act."""
+def _run_steps(args: argparse.Namespace, action: str, runner: Callable[..., list[steps.StepResult]]) -> Result:
     config = cfg.load(args.file or cfg.projects_file(), check_paths=True)
     project = _project_named(config, args.project)
-    results = steps.start(project, config, args.services_factory(), dry_run=args.dry_run)
+    results = runner(project, config, args.services_factory(), dry_run=args.dry_run)
     ok = steps.succeeded(results)
     for result in results:
-        log.info("start %s %s %s: %s", project.name, result.step, result.status, result.detail)
+        log.info("%s %s %s %s: %s", action, project.name, result.step, result.status, result.detail)
     payload: dict[str, Any] = {
         "ok": ok,
+        "action": action,
         "project": project.name,
         "dry_run": args.dry_run,
         "steps": [r.to_dict() for r in results],
@@ -119,6 +119,16 @@ def cmd_start(args: argparse.Namespace) -> Result:
         failed = [r.step for r in results if r.status == steps.FAILED]
         payload["error"] = "failed: " + ", ".join(failed)
     return payload, EXIT_OK if ok else EXIT_FAILURE
+
+
+def cmd_start(args: argparse.Namespace) -> Result:
+    """Bring a project up; every step is check-then-act."""
+    return _run_steps(args, "start", steps.start)
+
+
+def cmd_stop(args: argparse.Namespace) -> Result:
+    """Tear down what Start brought up, leaving the workspace in place."""
+    return _run_steps(args, "stop", steps.stop)
 
 
 # ------------------------------------------------------------- text output
@@ -161,7 +171,12 @@ def _print_status(result: dict[str, Any], out: TextIO) -> None:
             out.write(f"  command   {command['name']}{port} {state}\n")
         if snapshot["url"]:
             url = snapshot["url"]
-            state = f"reachable, {_owner_phrase(url)}" if url["reachable"] else "down"
+            if url["reachable"]:
+                state = f"responding, {_owner_phrase(url)}"
+            elif url["listening"]:
+                state = f"port open but no HTTP answer, {_owner_phrase(url)}"
+            else:
+                state = "down"
             out.write(f"  url       {url['value']} {state}\n")
         if snapshot.get("editor_open") is not None:
             out.write(f"  editor    {'open' if snapshot['editor_open'] else 'closed'}\n")
@@ -179,8 +194,11 @@ def _owner_phrase(entry: dict[str, Any]) -> str:
     return f"owner unknown ({detail})" if detail else "owner unknown"
 
 
-def _print_start(result: dict[str, Any], out: TextIO) -> None:
-    heading = "Plan for" if result["dry_run"] else "Started"
+def _print_steps(result: dict[str, Any], out: TextIO) -> None:
+    if result["dry_run"]:
+        heading = f"Plan to {result['action']}"
+    else:
+        heading = "Started" if result["action"] == "start" else "Stopped"
     out.write(f"{heading} {result['project']}\n")
     width = max((len(s["step"]) for s in result["steps"]), default=0)
     for step in result["steps"]:
@@ -191,7 +209,8 @@ _TEXT_PRINTERS: dict[str, Callable[[dict[str, Any], TextIO], None]] = {
     "list": _print_list,
     "validate": _print_validate,
     "status": _print_status,
-    "start": _print_start,
+    "start": _print_steps,
+    "stop": _print_steps,
 }
 
 
@@ -224,6 +243,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument("project", help="project name from the projects file")
     sub.add_argument("--dry-run", action="store_true", help="report what would happen without changing anything")
     sub.set_defaults(func=cmd_start)
+
+    sub = subparsers.add_parser("stop", parents=[common], help="stop a project's commands and close its windows; the workspace stays")
+    sub.add_argument("project", help="project name from the projects file")
+    sub.add_argument("--dry-run", action="store_true", help="report what would happen without changing anything")
+    sub.set_defaults(func=cmd_stop)
 
     return parser
 

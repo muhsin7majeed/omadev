@@ -71,16 +71,16 @@ Implemented:
   ports listening, URL reachable, editor and app windows open. Runs once.
 - `omadev start <project> [--dry-run] [--json]` — runs the start steps.
   `--dry-run` reads state but changes nothing; actions report `planned`.
+- `omadev stop <project> [--dry-run] [--json]` — runs the stop steps.
 
 Planned:
 
-- `omadev stop <project> [--json]` — runs the stop steps in reverse.
 - `omadev add|edit|remove <project> ...` — edits the projects file; the widget's
   form calls these instead of writing JSON itself.
 
 Every step is **check, then act**, and reports one of `skipped`, `started`,
-`focused`, `planned`, `failed` (later `stopped`) with a short reason. Details
-are written in the imperative ("create tab …"); the status carries the tense.
+`focused`, `stopped`, `planned`, `failed` with a short reason. Details are
+written in the imperative ("create tab …"); the status carries the tense.
 Output is human text by default and one JSON document with `--json`. Exit code
 0 only when no step failed.
 
@@ -95,16 +95,27 @@ apps before waiting for the URL):
 3. `terminal` — focus the terminal window hosting the multiplexer client,
    found by walking the client's parent pids to a Hyprland window; else open
    one. `terminal:focus` then shows the project's workspace in herdr.
-4. `wait` — wait for the URL's port to accept connections (`wait_timeout`).
+4. `wait` — wait until the URL answers HTTP (`wait_timeout`). Any status
+   code counts; an open port alone does not, because docker binds the port
+   before the app inside is ready.
 5. `browser` — `webapp`: focus the app window by class, else launch.
-   `browser`: `xdg-open`, only when the server was not already up before this run.
+   `browser`: `xdg-open`, only when the URL was not already answering before this run.
 6. `editor` — focus a window matching the editor's class whose title contains
    the project folder name as a whole word; else launch.
 7. `app:<name>` — focus a window matching `match`; else launch.
 
-Stop order (planned): send Ctrl-C to command panes and wait for their ports to
-close, run declared `stop_commands` (for example `docker compose down`), close
-the windows Start opened or focused, then close the workspace or session.
+Stop order (`steps.stop`), leaving the workspace, the terminal and browser
+tabs alone because they are the user's or cannot be told apart:
+
+1. `workspace` — located, never closed; reported as left in place.
+2. `command:<name>` in reverse — in the `omadev-<name>` tab: if busy, send
+   Ctrl-C (`ctrl+c` in herdr, `C-c` in tmux), wait until the pane is an idle
+   shell and the port has closed, then close the tab. An idle tab is just
+   closed. Still busy after `wait_timeout` is `failed` and the tab stays.
+3. `stop:<n>` — each `stop_commands` entry, split like a POSIX shell would
+   (`shlex`) but run without one, in the project directory, with `wait_timeout`.
+4. `app:<name>`, `editor` — close the matching windows if open.
+5. `browser` — close the web app window in `webapp` mode; a tab is left open.
 
 ### Idempotency checks and their sources
 

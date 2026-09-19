@@ -7,16 +7,20 @@ shell: commands are argv lists.
 
 from __future__ import annotations
 
+import shlex
 import shutil
 import socket
 import subprocess
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol, Sequence
 
 DEFAULT_TIMEOUT = 10.0
 PROBE_TIMEOUT = 0.5
+HTTP_TIMEOUT = 2.0
 
 
 class ToolMissing(Exception):
@@ -111,6 +115,41 @@ def port_open(host: str, port: int, timeout: float = PROBE_TIMEOUT) -> bool:
         return False
 
 
+def http_ok(url: str, timeout: float = HTTP_TIMEOUT) -> bool:
+    """True if the URL answers HTTP at all, whatever the status code.
+
+    A TCP connect is not enough for docker projects: the proxy binds the
+    port the moment the container starts, long before the app inside can
+    answer. Any HTTP response, error statuses included, means the app is up.
+    """
+    request = urllib.request.Request(url, method="GET", headers={"User-Agent": "omadev"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout):
+            return True
+    except urllib.error.HTTPError:
+        return True
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+def wait_until(
+    condition: Callable[[], bool],
+    timeout: float,
+    *,
+    interval: float = 0.5,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> bool:
+    """Poll `condition` until it holds or `timeout` seconds pass."""
+    deadline = clock() + timeout
+    while True:
+        if condition():
+            return True
+        if clock() >= deadline:
+            return False
+        sleep(interval)
+
+
 def wait_for_port(
     host: str,
     port: int,
@@ -122,13 +161,23 @@ def wait_for_port(
     sleep: Callable[[float], None] = time.sleep,
 ) -> bool:
     """Poll until host:port accepts connections or `timeout` seconds pass."""
-    deadline = clock() + timeout
-    while True:
-        if probe(host, port):
-            return True
-        if clock() >= deadline:
-            return False
-        sleep(interval)
+    return wait_until(lambda: probe(host, port), timeout, interval=interval, clock=clock, sleep=sleep)
+
+
+def wait_for_http(url: str, timeout: float, *, interval: float = 0.5) -> bool:
+    """Poll until the URL answers HTTP or `timeout` seconds pass."""
+    return wait_until(lambda: http_ok(url), timeout, interval=interval)
+
+
+def split_command(text: str) -> list[str]:
+    """Turn a command string from the config into argv, without a shell.
+
+    Quoting works as in a POSIX shell; pipes, redirects and variables do not.
+    """
+    argv = shlex.split(text)
+    if not argv:
+        raise ValueError("empty command")
+    return argv
 
 
 def list_processes(proc_root: Path = Path("/proc")) -> list[tuple[int, list[str]]]:

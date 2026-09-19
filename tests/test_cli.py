@@ -55,6 +55,16 @@ class CliTests(unittest.TestCase):
         self.assertIn("herdr is not installed", out)
         self.assertIn("omadev: failed: workspace", err)
 
+    def test_stop_dry_run_json(self) -> None:
+        fake = FakeServices()
+        fake.runner.on_json("herdr", "workspace", "list", result={"workspaces": []})
+        self.write({"version": 1, "projects": [{"name": "demo", "path": str(self.dir)}]})
+        code, out, _ = self.run_cli("stop", "demo", "--dry-run", "--json", "--file", str(self.file), services=fake)
+        self.assertEqual(code, 0)
+        result = json.loads(out)
+        self.assertEqual(result["action"], "stop")
+        self.assertEqual(result["steps"][0]["step"], "workspace")
+
     def test_status_json(self) -> None:
         fake = FakeServices()
         fake.runner.on_json("herdr", "workspace", "list", result={"workspaces": []})

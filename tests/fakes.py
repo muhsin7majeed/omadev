@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from omadev_cli import hypr, ports, steps
+from omadev_cli.config import url_port
 from omadev_cli.herdr import Herdr
 from omadev_cli.system import CommandResult, ToolMissing
 from omadev_cli.tmux import Tmux
@@ -70,7 +71,8 @@ class FakeRunner:
         """Calls that would change something: anything but list/get/probe commands."""
         read_only = {("hyprctl", "clients"), ("herdr", "workspace", "list"), ("herdr", "tab", "list"),
                      ("herdr", "pane", "list"), ("herdr", "pane", "process-info"), ("tmux", "has-session"),
-                     ("tmux", "list-windows"), ("tmux", "list-clients"), ("tmux", "display-message")}
+                     ("tmux", "list-windows"), ("tmux", "list-clients"), ("tmux", "display-message"),
+                     ("ss",), ("docker", "ps")}
         return [c for c in self.calls if not any(c[: len(prefix)] == prefix for prefix in read_only)]
 
 
@@ -87,22 +89,29 @@ class FakeServices:
     runner: FakeRunner = field(default_factory=FakeRunner)
     open_ports: set[int] = field(default_factory=set)
     ports_after_wait: set[int] = field(default_factory=set)
+    # URLs whose port is open but which do not answer HTTP (docker proxy
+    # bound, app inside still starting).
+    http_dead: set[str] = field(default_factory=set)
     windows: list[hypr.Window] = field(default_factory=list)
     processes: list[tuple[int, list[str]]] = field(default_factory=list)
     listeners: dict[int, ports.Listener] = field(default_factory=dict)
     containers: list[ports.Container] | None = field(default_factory=list)
     proc_root: Path = Path("/nonexistent-proc")
-    waited: list[tuple[str, int, float]] = field(default_factory=list)
+    waited: list[tuple[str, float]] = field(default_factory=list)
     now: float = 0.0
     docker_asked: int = 0
 
     def probe(self, host: str, port: int) -> bool:
         return port in self.open_ports
 
-    def wait(self, host: str, port: int, timeout: float) -> bool:
-        self.waited.append((host, port, timeout))
+    def http_ok(self, url: str) -> bool:
+        return url_port(url) in self.open_ports and url not in self.http_dead
+
+    def wait_url(self, url: str, timeout: float) -> bool:
+        self.waited.append((url, timeout))
         self.open_ports |= self.ports_after_wait
-        return port in self.open_ports
+        self.http_dead.clear()
+        return self.http_ok(url)
 
     def sleep(self, seconds: float) -> None:
         self.now += seconds
@@ -123,7 +132,8 @@ class FakeServices:
             herdr=Herdr(self.runner),
             tmux=Tmux(self.runner),
             probe=self.probe,
-            wait=self.wait,
+            http_ok=self.http_ok,
+            wait_url=self.wait_url,
             processes=lambda: list(self.processes),
             windows=lambda: list(self.windows),
             listener=self.find_listener,

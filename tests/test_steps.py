@@ -164,7 +164,20 @@ class StartTests(unittest.TestCase):
         self.assertEqual(results["wait"].status, steps.FAILED)
         self.assertEqual(results["browser"].status, steps.SKIPPED)
         self.assertFalse(steps.succeeded(list(results.values())))
-        self.assertEqual(self.fake.waited, [("localhost", 3000, 90.0)])
+        self.assertEqual(self.fake.waited, [("http://localhost:3000", 90.0)])
+        self.assertIn("nothing is listening", results["wait"].detail)
+
+    def test_open_port_without_http_answer_is_not_ready(self) -> None:
+        # Docker binds the port before the app answers; Start must wait for HTTP.
+        self.everything_running()
+        self.fake.http_dead = {"http://localhost:3000"}
+        results = self.start(kadha(self.path))
+        self.assertEqual(results["command:app"].status, steps.SKIPPED)
+        self.assertEqual(results["wait"].status, steps.STARTED)
+        self.assertIn("responds after", results["wait"].detail)
+        self.assertEqual(self.fake.waited, [("http://localhost:3000", 90.0)])
+        # The server was not answering before this run, so the tab is opened.
+        self.assertEqual(results["browser"].status, steps.STARTED)
 
     def test_herdr_missing_fails_workspace_and_skips_dependents(self) -> None:
         self.fake.runner.tools.discard("herdr")
@@ -245,6 +258,144 @@ class StartTests(unittest.TestCase):
         results = self.start(kadha(self.path, browser="webapp"))
         self.assertEqual(results["browser"].status, steps.FOCUSED)
         self.assertIn(("hyprctl", "dispatch", 'hl.dsp.focus({ window = "address:0xf" })'), self.runner.calls)
+
+
+class StopTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "kadha"
+        self.path.mkdir()
+        self.fake = FakeServices()
+        self.runner = self.fake.runner
+
+    def stop(self, config: cfg.Config, **kwargs: object) -> dict[str, steps.StepResult]:
+        project = config.projects[0]
+        return by_step(steps.stop(project, config, self.fake.build(), **kwargs))
+
+    def running_project(self) -> None:
+        self.runner.on_json("herdr", "workspace", "list", result=WORKSPACES)
+        self.runner.on_json("herdr", "tab", "list", result=TABS)
+        self.runner.on_json("herdr", "pane", "list", result=PANES)
+        self.runner.on_json("herdr", "pane", "process-info", result=BUSY)
+        self.runner.on("herdr", "tab", "close")
+        self.runner.on("hyprctl", "dispatch", stdout="ok\n")
+        self.fake.open_ports = {3000}
+        self.fake.windows = [
+            window(address="0xa", cls="dev.zed.Zed", title="kadha", pid=7),
+            window(address="0xe", cls="org.omarchy.lazydocker", title="lazydocker", pid=8),
+            window(address="0xc", cls="com.mitchellh.ghostty", title="nitrogen: kadha", pid=50),
+        ]
+
+        def interrupted(argv: tuple[str, ...]) -> CommandResult | None:
+            if argv[:3] != ("herdr", "pane", "send-keys"):
+                return None
+            # Ctrl-C lands: the pane goes back to a prompt and the port closes.
+            self.runner.on_json("herdr", "pane", "process-info", result=IDLE)
+            self.fake.open_ports.discard(3000)
+            return CommandResult(argv, 0, "", "")
+
+        self.runner.respond_with(interrupted)
+
+    def test_stop_tears_down_in_reverse_and_leaves_the_workspace(self) -> None:
+        self.running_project()
+        self.runner.tools.add("docker")
+        self.runner.on("docker", "compose", "down")
+        results = self.stop(kadha(self.path, stop_commands=["docker compose down"]))
+
+        order = [r.step for r in results.values()]
+        self.assertEqual(order, ["workspace", "command:app", "stop:1", "app:lazydocker", "editor", "browser"])
+        self.assertEqual(results["stop:1"].status, steps.STOPPED)
+        self.assertEqual(results["workspace"].status, steps.SKIPPED)
+        self.assertIn("left in place", results["workspace"].detail)
+        self.assertEqual(results["command:app"].status, steps.STOPPED)
+        self.assertIn("interrupt docker", results["command:app"].detail)
+        self.assertIn(("herdr", "pane", "send-keys", "w5:p9", "ctrl+c"), self.runner.calls)
+        self.assertIn(("herdr", "tab", "close", "w5:t7"), self.runner.calls)
+        self.assertEqual(results["editor"].status, steps.STOPPED)
+        self.assertEqual(results["app:lazydocker"].status, steps.STOPPED)
+        self.assertEqual(results["browser"].status, steps.SKIPPED)
+        self.assertIn("tab left open", results["browser"].detail)
+        closes = [c[2] for c in self.runner.calls if c[:2] == ("hyprctl", "dispatch")]
+        self.assertEqual(closes, ['hl.dsp.close({ window = "address:0xe" })', 'hl.dsp.close({ window = "address:0xa" })'])
+        # Never touched: the workspace and the terminal.
+        self.assertNotIn(("herdr", "workspace", "close", "w5"), self.runner.calls)
+        self.assertNotIn('hl.dsp.close({ window = "address:0xc" })', closes)
+
+    def test_stop_command_runs_in_project_dir_without_a_shell(self) -> None:
+        self.running_project()
+        self.runner.on("docker", "compose", "down")
+        self.runner.tools.add("docker")
+        results = self.stop(kadha(self.path, stop_commands=["docker compose down", "echo 'all done'"]))
+        self.assertEqual(results["stop:1"].status, steps.STOPPED)
+        self.assertIn(("docker", "compose", "down"), self.runner.calls)
+        # 'echo' is not a registered tool in the fake: reported as failed, run continues.
+        self.assertEqual(results["stop:2"].status, steps.FAILED)
+        self.assertEqual(results["editor"].status, steps.STOPPED)
+
+    def test_stop_gives_up_when_the_command_will_not_die(self) -> None:
+        self.running_project()
+        self.runner.on("herdr", "pane", "send-keys")          # Ctrl-C has no effect this time
+        self.runner._responders = [r for r in self.runner._responders if r.__name__ != "interrupted"]
+        results = self.stop(kadha(self.path))
+        self.assertEqual(results["command:app"].status, steps.FAILED)
+        self.assertIn("still running after 90s", results["command:app"].detail)
+        self.assertNotIn(("herdr", "tab", "close", "w5:t7"), self.runner.calls)
+        self.assertGreaterEqual(self.fake.now, 90.0)
+
+    def test_stop_when_nothing_is_running(self) -> None:
+        self.runner.on_json("herdr", "workspace", "list", result={"workspaces": []})
+        results = self.stop(kadha(self.path))
+        self.assertEqual({r.status for r in results.values()}, {steps.SKIPPED})
+        self.assertEqual(self.runner.mutating_calls(), [])
+
+    def test_stop_dry_run_touches_nothing(self) -> None:
+        self.running_project()
+        results = self.stop(kadha(self.path, stop_commands=["docker compose down"]), dry_run=True)
+        planned = {k for k, r in results.items() if r.status == steps.PLANNED}
+        self.assertEqual(planned, {"command:app", "stop:1", "editor", "app:lazydocker"})
+        self.assertEqual(self.runner.mutating_calls(), [])
+        self.assertEqual(self.fake.open_ports, {3000})
+
+    def test_stop_idle_tab_is_just_closed(self) -> None:
+        self.running_project()
+        self.runner.on_json("herdr", "pane", "process-info", result=IDLE)
+        results = self.stop(kadha(self.path))
+        self.assertEqual(results["command:app"].status, steps.STOPPED)
+        self.assertIn("close idle tab", results["command:app"].detail)
+        self.assertNotIn(("herdr", "pane", "send-keys", "w5:p9", "ctrl+c"), self.runner.calls)
+
+    def test_stop_webapp_window_is_closed(self) -> None:
+        self.running_project()
+        self.fake.windows.append(window(address="0xf", cls="brave-localhost__-Default", title="Kadha", pid=9))
+        results = self.stop(kadha(self.path, browser="webapp"))
+        self.assertEqual(results["browser"].status, steps.STOPPED)
+
+    def test_stop_tmux_project(self) -> None:
+        self.runner.on("tmux", "has-session")
+        self.runner.on("tmux", "list-windows", stdout="site:0\tbash\nsite:1\tomadev-web\n")
+        self.runner.on("tmux", "display-message", stdout="node\n")
+        self.runner.on("tmux", "kill-window")
+        self.fake.open_ports = {8080}
+
+        def interrupted(argv: tuple[str, ...]) -> CommandResult | None:
+            if argv[:2] != ("tmux", "send-keys"):
+                return None
+            self.runner.on("tmux", "display-message", stdout="bash\n")
+            self.fake.open_ports.discard(8080)
+            return CommandResult(argv, 0, "", "")
+
+        self.runner.respond_with(interrupted)
+        config = cfg.parse({"version": 1, "projects": [{
+            "name": "site", "path": str(self.path), "multiplexer": "tmux",
+            "commands": [{"name": "web", "run": "npm run dev", "port": 8080}],
+        }]}, check_paths=False)
+        results = by_step(steps.stop(config.projects[0], config, self.fake.build()))
+        self.assertEqual(results["command:web"].status, steps.STOPPED)
+        self.assertIn(("tmux", "send-keys", "-t", "site:1", "C-c"), self.runner.calls)
+        self.assertIn(("tmux", "kill-window", "-t", "site:1"), self.runner.calls)
+        self.assertEqual(results["editor"].status, steps.SKIPPED)
+        self.assertNotIn(("tmux", "kill-session", "-t", "=site"), self.runner.calls)
 
 
 class TmuxStartTests(unittest.TestCase):

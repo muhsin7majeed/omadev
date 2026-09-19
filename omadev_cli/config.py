@@ -201,6 +201,23 @@ class Project:
             return None
         return url_port(self.url)
 
+    def command_port(self, command: "Command") -> int | None:
+        """The port a process is checked against.
+
+        Its own `port` when set. Otherwise, when this is the project's only
+        process and the page is local, the page's port: one process and one
+        page almost always means the same server, and the check that stops
+        Start from typing into a taken port is too useful to lose to a blank
+        field.
+        """
+        if command.port is not None:
+            return command.port
+        if len(self.commands) == 1 and self.url is not None:
+            host = (urlsplit(self.url).hostname or "").lower()
+            if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0", "::"):
+                return url_port(self.url)
+        return None
+
 
 @dataclass(frozen=True)
 class Config:
@@ -508,8 +525,8 @@ def parse_project(data: Any, *, check_paths: bool = True) -> tuple[Project, tupl
 def with_project(config: Config, project: Project, *, replacing: str | None = None) -> Config:
     """A copy of `config` with `project` added, or replacing the project named `replacing`."""
     others = [p for p in config.projects if p.name != replacing]
-    if any(p.name == project.name for p in others):
-        raise ConfigError("project.name", f"a project named '{project.name}' already exists")
+    if any(p.name.casefold() == project.name.casefold() for p in others):
+        raise ConfigError("project.name", f"a project named '{project.name}' already exists (names are matched ignoring case)")
     if replacing is not None and config.find(replacing) is None:
         raise ConfigError("project", f"no project named '{replacing}'")
     if replacing is None:
@@ -546,9 +563,9 @@ def parse(data: Any, *, check_paths: bool = True) -> Config:
     )
     seen: set[str] = set()
     for project in projects:
-        if project.name in seen:
-            raise ConfigError("projects", f"duplicate project name '{project.name}'")
-        seen.add(project.name)
+        if project.name.casefold() in seen:
+            raise ConfigError("projects", f"duplicate project name '{project.name}' (names are matched ignoring case)")
+        seen.add(project.name.casefold())
 
     return Config(
         version=version,

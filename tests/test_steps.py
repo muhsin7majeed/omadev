@@ -228,12 +228,15 @@ class StartTests(unittest.TestCase):
         self.fake.listeners[3000] = ports.Listener(pid=77, name="node", cwd=other)
         self.fake.containers = []
         results = self.start(kadha(self.path))
-        self.assertEqual(results["command:app"].status, steps.FAILED)
-        self.assertIn("muhsi.in", results["command:app"].detail)
-        self.assertEqual(results["wait"].status, steps.FAILED)
+        # Caught before anything is typed: the page's port belongs elsewhere.
+        self.assertEqual(results["page"].status, steps.FAILED)
+        self.assertIn("muhsi.in", results["page"].detail)
+        self.assertEqual(results["command:app"].status, steps.SKIPPED)
+        self.assertEqual(results["wait"].status, steps.SKIPPED)
         self.assertEqual(results["browser"].status, steps.SKIPPED)
         self.assertIn("another project", results["browser"].detail)
         self.assertNotIn(("xdg-open", "http://localhost:3000"), self.runner.detached)
+        self.assertNotIn(("herdr", "pane", "run", "w5:p9", "docker compose up"), self.runner.calls)
         self.assertFalse(steps.succeeded(list(results.values())))
         # The rest still happens: the terminal is focused and the editor opens.
         self.assertEqual(results["terminal"].status, steps.FOCUSED)
@@ -242,7 +245,47 @@ class StartTests(unittest.TestCase):
         # A dry run must not plan to open the browser on the other project either.
         plan = self.start(kadha(self.path), dry_run=True)
         self.assertEqual(plan["browser"].status, steps.SKIPPED)
-        self.assertEqual(plan["wait"].status, steps.FAILED)
+        self.assertEqual(plan["page"].status, steps.FAILED)
+
+    def test_process_without_port_borrows_the_page_port(self) -> None:
+        self.everything_running()
+        other = Path(self.tmp.name) / "muhsi.in"
+        other.mkdir()
+        self.fake.listeners[3000] = ports.Listener(pid=77, name="node", cwd=other)
+        self.fake.containers = []
+        # No port on the process, page on 3000, one process: the check still applies.
+        config = kadha(self.path, commands=[{"name": "app", "run": "docker compose up"}])
+        results = self.start(config)
+        self.assertEqual(results["page"].status, steps.FAILED)
+        self.assertEqual(results["command:app"].status, steps.SKIPPED)
+        snapshot = steps.status(config.projects[0], config, self.fake.build())
+        self.assertEqual(snapshot["commands"][0]["port"], 3000)
+        # With two processes nothing is assumed.
+        two = kadha(self.path, commands=[{"name": "a", "run": "x"}, {"name": "b", "run": "y"}])
+        self.assertIsNone(two.projects[0].command_port(two.projects[0].commands[0]))
+
+    def test_command_that_dies_at_once_is_reported(self) -> None:
+        self.everything_running()
+        self.fake.open_ports = set()
+        self.runner.on_json("herdr", "pane", "process-info", result=IDLE)
+
+        def dies(argv: tuple[str, ...]) -> CommandResult | None:
+            if argv[:3] != ("herdr", "pane", "run"):
+                return None
+            self.runner.on_json("herdr", "pane", "process-info", result=IDLE)   # back at the prompt
+            return CommandResult(argv, 0, "", "")
+
+        self.runner.respond_with(dies)
+        results = self.start(kadha(self.path, url=None))
+        self.assertEqual(results["command:app"].status, steps.FAILED)
+        self.assertIn("exited right away", results["command:app"].detail)
+
+    def test_workspace_label_matches_ignoring_case(self) -> None:
+        self.everything_running()
+        results = self.start(kadha(self.path, name="Kadha"))
+        self.assertEqual(results["workspace"].status, steps.SKIPPED)
+        self.assertIn("w5", results["workspace"].detail)
+        self.assertNotIn(("herdr", "workspace", "create", "--cwd", str(self.path), "--label", "Kadha", "--no-focus"), self.runner.calls)
 
     def test_port_with_unknown_owner_is_left_alone(self) -> None:
         self.everything_running()
@@ -427,6 +470,7 @@ class TmuxStartTests(unittest.TestCase):
 
     def test_fresh_tmux_session(self) -> None:
         self.runner.on("tmux", "has-session", returncode=1)
+        self.runner.on("tmux", "list-sessions", stdout="")
         self.runner.on("tmux", "new-session")
         self.runner.on("tmux", "new-window", stdout="my_site:1\n")
         self.runner.on("tmux", "send-keys")

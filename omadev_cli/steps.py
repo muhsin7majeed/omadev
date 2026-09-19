@@ -52,6 +52,7 @@ PLANNED = "planned"
 LOCAL_HOST = "localhost"
 SERVER_START_TIMEOUT = 15.0
 PLACE_TIMEOUT = 15.0
+SETTLE_SECONDS = 1.5
 SETUP_TAB = "setup"
 HERDR_INTERRUPT = "ctrl+c"
 TMUX_INTERRUPT = "C-c"
@@ -256,8 +257,10 @@ class Run:
             workspace = herdr.find_workspace(self.project.session_name)
             return Session("herdr", workspace.id, created=False) if workspace else None
         name = session_name(self.project.session_name)
-        if self.s.tmux.available() and self.s.tmux.has_session(name):
-            return Session("tmux", name, created=False)
+        if self.s.tmux.available():
+            existing = self.s.tmux.find_session(name)
+            if existing is not None:
+                return Session("tmux", existing, created=False)
         return None
 
     def editor_window(self) -> hypr.Window | None:
@@ -305,6 +308,30 @@ class StartRun(Run):
         # Set when a setup command failed: processes must not start on a
         # half-prepared project.
         self.setup_failed = False
+
+    # ------------------------------------------------------------- preflight
+
+    def check_page_port(self) -> None:
+        """Before anything is typed: is the page's port another project's?
+
+        The per-process check only knows ports that are configured. The page
+        is often the only place the port is written down, so it is checked
+        first; a port held elsewhere stops the run before a process is sent
+        to a tab where it would fail to bind.
+        """
+        url = self.project.url
+        if url is None:
+            return
+        host = urlsplit(url).hostname or LOCAL_HOST
+        if not ports.is_local_host(host):
+            return
+        port = url_port(url)
+        if not self.s.probe(host, port):
+            return
+        state = self.ports.state(port)
+        if state.owner == ports.OTHER:
+            self.url_blocked = True
+            self.record("page", FAILED, f"{host}:{port} is held by {state.detail}; stop that project first")
 
     # ------------------------------------------------------------ workspace
 
@@ -358,9 +385,10 @@ class StartRun(Run):
         if not tmux.available():
             self.record(step, FAILED, "tmux is not installed")
             return None
-        if tmux.has_session(name):
-            self.record(step, SKIPPED, f"tmux session '{name}' exists")
-            return Session("tmux", name, created=False)
+        existing = tmux.find_session(name)
+        if existing is not None:
+            self.record(step, SKIPPED, f"tmux session '{existing}' exists")
+            return Session("tmux", existing, created=False)
         if not self.act(step, f"create tmux session '{name}' at {self.project.path}", lambda: tmux.new_session(name, self.project.path)):
             return None
         return Session("tmux", name, created=True)
@@ -488,16 +516,20 @@ class StartRun(Run):
         if self.setup_failed:
             self.record(step, SKIPPED, "a setup command failed")
             return
-        if command.port is not None:
-            state = self.ports.state(command.port)
+        if self.url_blocked:
+            self.record(step, SKIPPED, "the page's port is held by another project")
+            return
+        port = self.project.command_port(command)
+        if port is not None:
+            state = self.ports.state(port)
             if state.owner == ports.PROJECT:
-                self.record(step, SKIPPED, f"port {command.port} is already served by {state.detail}")
+                self.record(step, SKIPPED, f"port {port} is already served by {state.detail}")
                 return
             if state.owner == ports.UNKNOWN:
-                self.record(step, SKIPPED, f"port {command.port} is listening ({state.detail}); not starting a second server")
+                self.record(step, SKIPPED, f"port {port} is listening ({state.detail}); not starting a second server")
                 return
             if state.owner == ports.OTHER:
-                self.record(step, FAILED, f"port {command.port} is held by {state.detail}; stop that project first")
+                self.record(step, FAILED, f"port {port} is held by {state.detail}; stop that project first")
                 return
         if session is None:
             self.record(step, SKIPPED, "no workspace to run in")
@@ -519,6 +551,7 @@ class StartRun(Run):
             def create_and_run() -> None:
                 _, pane_id = herdr.create_tab(session.id, cwd, label, env=command.env)
                 herdr.run(pane_id, command.run)
+                self.confirm_running(lambda: not herdr.foreground(pane_id).idle)
 
             self.act(step, f"create tab '{label}' and run '{command.run}'", create_and_run)
             return
@@ -531,7 +564,23 @@ class StartRun(Run):
         if not foreground.idle:
             self.record(step, SKIPPED, f"tab '{label}' is busy running {foreground.summary}")
             return
-        self.act(step, f"run '{command.run}' in tab '{label}'", lambda: herdr.run(pane.id, command.run))
+
+        def run() -> None:
+            herdr.run(pane.id, command.run)
+            self.confirm_running(lambda: not herdr.foreground(pane.id).idle)
+
+        self.act(step, f"run '{command.run}' in tab '{label}'", run)
+
+    def confirm_running(self, still_running: Callable[[], bool]) -> None:
+        """A moment after sending a process, make sure it is still there.
+
+        A server that cannot bind its port, or a command that is not
+        installed, is back at the prompt within a second. Reporting that as
+        started would hide the very failure the user needs to see.
+        """
+        self.s.sleep(SETTLE_SECONDS)
+        if not still_running():
+            raise StepFailure("it exited right away; open its tab to see why")
 
     def _run_in_tmux(self, step: str, command: Command, session: Session, cwd: Path) -> None:
         tmux = self.s.tmux
@@ -540,7 +589,9 @@ class StartRun(Run):
 
         if target is None:
             def create_and_run() -> None:
-                tmux.run(tmux.new_window(session.id, name, cwd, env=command.env), command.run)
+                created = tmux.new_window(session.id, name, cwd, env=command.env)
+                tmux.run(created, command.run)
+                self.confirm_running(lambda: not tmux.idle(created))
 
             self.act(step, f"create window '{name}' and run '{command.run}'", create_and_run)
             return
@@ -548,7 +599,12 @@ class StartRun(Run):
         if not tmux.idle(target):
             self.record(step, SKIPPED, f"window '{name}' is busy running {tmux.current_command(target)}")
             return
-        self.act(step, f"run '{command.run}' in window '{name}'", lambda: tmux.run(target, command.run))
+
+        def run() -> None:
+            tmux.run(target, command.run)
+            self.confirm_running(lambda: not tmux.idle(target))
+
+        self.act(step, f"run '{command.run}' in window '{name}'", run)
 
     def _run_in_terminal(self, step: str, command: Command, cwd: Path) -> None:
         """"none" mode: the process gets a terminal window with a known class."""
@@ -643,6 +699,9 @@ class StartRun(Run):
         if self.setup_failed:
             self.record(step, SKIPPED, "a setup command failed")
             return False, False
+        if self.url_blocked:
+            self.record(step, SKIPPED, "the page's port is held by another project (see the page step)")
+            return False, False
         host = urlsplit(url).hostname or LOCAL_HOST
         port = url_port(url)
         listening = self.s.probe(host, port)
@@ -703,8 +762,12 @@ class StartRun(Run):
                 self.record(step, SKIPPED, "page not available (see the wait step), not opening a browser tab")
                 return
             # A tab lands in an existing browser window, which stays where it
-            # is; only a browser window that did not exist before is placed.
-            self.launch_placed(step, f"open {url} in the browser", ["xdg-open", url],
+            # is, so there is nothing to wait for or move. Only when no
+            # browser window exists does xdg-open create one worth placing.
+            if hypr.first(self.windows(), lambda w: hypr.class_matches(w, BROWSER_CLASSES)) is not None:
+                self.act(step, f"open {url} as a tab in the browser", lambda: self.s.runner.detach(["xdg-open", url]))
+                return
+            self.launch_placed(step, f"open {url} in a new browser window", ["xdg-open", url],
                                workspace=workspace, appears=lambda w: hypr.class_matches(w, BROWSER_CLASSES))
         except StepError as exc:
             self.record(step, FAILED, str(exc))
@@ -723,12 +786,24 @@ class StartRun(Run):
             detail = f"open editor: {' '.join(argv)}"
             launch = gui_argv(self.s.runner, argv)
             workspace = self.project.workspaces.editor
-            if editor.share_window or editor.match is None:
-                # A shared window already has a place; without a class match
-                # the new window cannot be told apart, so it is not moved.
+            if editor.match is None:
+                # Without a class match the new window cannot be told apart,
+                # so it is not moved.
                 self.act(step, detail, lambda: self.s.runner.detach(launch, cwd=self.project.path))
                 return
-            appears = self.editor_predicate(fill(editor.match, self.project), self.project.path.name)
+            pattern = fill(editor.match, self.project)
+            if editor.share_window and hypr.first(self.windows(), lambda w: hypr.class_matches(w, pattern)) is not None:
+                # The project joins the editor window that is already open,
+                # wherever it is; that window is not moved.
+                self.act(step, f"{detail} (into the open editor window)", lambda: self.s.runner.detach(launch, cwd=self.project.path))
+                return
+            if editor.share_window:
+                # No editor window yet: the shared launch opens a fresh one,
+                # which is ours to place. Only the class can identify it, as
+                # its title settles after it appears.
+                appears = lambda w: hypr.class_matches(w, pattern)  # noqa: E731
+            else:
+                appears = self.editor_predicate(pattern, self.project.path.name)
             self.launch_placed(step, detail, launch, workspace=workspace, appears=appears, cwd=self.project.path)
         except StepError as exc:
             self.record(step, FAILED, str(exc))
@@ -795,15 +870,16 @@ class StopRun(Run):
             self.act(step, f"close idle tab '{label}'", lambda: herdr.close_tab(tab.id), status=STOPPED)
             return
         timeout = self.project.wait_timeout
+        port = self.project.command_port(command)
 
         def interrupt_and_close() -> None:
             herdr.send_keys(pane.id, HERDR_INTERRUPT)
-            settled = self.wait_until(lambda: herdr.foreground(pane.id).idle and self._port_closed(command.port), timeout)
+            settled = self.wait_until(lambda: herdr.foreground(pane.id).idle and self._port_closed(port), timeout)
             if not settled:
                 raise StepFailure(f"still running after {timeout}s; tab left open")
             herdr.close_tab(tab.id)
 
-        waiting = f", wait for port {command.port} to close" if command.port is not None else ""
+        waiting = f", wait for port {port} to close" if port is not None else ""
         self.act(step, f"interrupt {foreground.summary}{waiting}, close tab '{label}'", interrupt_and_close, status=STOPPED)
 
     def _stop_in_tmux(self, step: str, command: Command, session: Session) -> None:
@@ -818,15 +894,16 @@ class StopRun(Run):
             return
         running = tmux.current_command(target)
         timeout = self.project.wait_timeout
+        port = self.project.command_port(command)
 
         def interrupt_and_close() -> None:
             tmux.send_keys(target, TMUX_INTERRUPT)
-            settled = self.wait_until(lambda: tmux.idle(target) and self._port_closed(command.port), timeout)
+            settled = self.wait_until(lambda: tmux.idle(target) and self._port_closed(port), timeout)
             if not settled:
                 raise StepFailure(f"still running after {timeout}s; window left open")
             tmux.kill_window(target)
 
-        waiting = f", wait for port {command.port} to close" if command.port is not None else ""
+        waiting = f", wait for port {port} to close" if port is not None else ""
         self.act(step, f"interrupt {running}{waiting}, close window '{name}'", interrupt_and_close, status=STOPPED)
 
     def _stop_in_terminal(self, step: str, command: Command) -> None:
@@ -836,13 +913,14 @@ class StopRun(Run):
             self.record(step, SKIPPED, "no terminal window for it")
             return
         timeout = self.project.wait_timeout
+        port = self.project.command_port(command)
 
         def close_and_wait() -> None:
             hypr.close(self.s.runner, window)
-            if not self.wait_until(lambda: self._port_closed(command.port), timeout):
-                raise StepFailure(f"port {command.port} still open after {timeout}s")
+            if not self.wait_until(lambda: self._port_closed(port), timeout):
+                raise StepFailure(f"port {port} still open after {timeout}s")
 
-        waiting = f" and wait for port {command.port} to close" if command.port is not None else ""
+        waiting = f" and wait for port {port} to close" if port is not None else ""
         self.act(step, f"close its terminal window{waiting}", close_and_wait, status=STOPPED)
 
     def close_setup_tab(self, session: Session | None) -> None:
@@ -973,6 +1051,7 @@ def stop(project: Project, config: Config, services: Services, *, dry_run: bool 
 
 def start(project: Project, config: Config, services: Services, *, dry_run: bool = False) -> list[StepResult]:
     run = StartRun(project, config, services, dry_run=dry_run)
+    run.check_page_port()
     session = run.ensure_multiplexer()
     run.run_setup(session)
     run.run_commands(session)
@@ -1009,9 +1088,8 @@ def status(project: Project, config: Config, services: Services) -> dict:
             workspace = services.herdr.find_workspace(project.session_name) if services.herdr.available() and services.herdr.server_running() else None
             snapshot["workspace"] = {"present": workspace is not None, "id": workspace.id if workspace else None}
         else:
-            name = session_name(project.session_name)
-            present = services.tmux.available() and services.tmux.has_session(name)
-            snapshot["workspace"] = {"present": present, "id": name if present else None}
+            existing = services.tmux.find_session(session_name(project.session_name)) if services.tmux.available() else None
+            snapshot["workspace"] = {"present": existing is not None, "id": existing}
     except StepError as exc:
         snapshot["workspace"] = {"present": False, "id": None, "error": str(exc)}
 
@@ -1024,9 +1102,10 @@ def status(project: Project, config: Config, services: Services) -> dict:
     inspector = PortInspector(project, services)
     snapshot["commands"] = []
     for command in project.commands:
-        entry: dict = {"name": command.name, "port": command.port, "listening": None, "owner": None, "detail": None}
-        if command.port is not None:
-            entry.update(inspector.state(command.port).to_dict())
+        port = project.command_port(command)
+        entry: dict = {"name": command.name, "port": port, "listening": None, "owner": None, "detail": None}
+        if port is not None:
+            entry.update(inspector.state(port).to_dict())
         elif project.multiplexer == "none":
             entry["listening"] = lookup.process_window(command.name) is not None
         snapshot["commands"].append(entry)

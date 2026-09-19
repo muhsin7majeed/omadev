@@ -79,6 +79,13 @@ Column {
     return value !== undefined && value !== null && value !== ""
   }
 
+  // Called by the host when the form is (re)opened: top of the form,
+  // collapsible sections closed again, whatever the previous visit left.
+  function reset() {
+    opened = ({})
+    scroller.contentY = 0
+  }
+
   function isOpen(section) {
     if (section.collapsed !== true) return true
     return opened[section.key] === true

@@ -50,11 +50,23 @@ class FakeRunner:
         self._responders.append(responder)
         return self
 
+    # A sent command is running afterwards, like a real one, unless a test
+    # registers a later responder that says otherwise (a failing command, a
+    # setup step that finishes). Registered *before* the responders run so a
+    # test's own registration made during the same call wins.
+    def _process_starts(self, args: tuple[str, ...]) -> None:
+        if args[:3] == ("herdr", "pane", "run") and len(args) > 3:
+            self.on_json("herdr", "pane", "process-info", "--pane", args[3], result={
+                "process_info": {"shell_pid": 1, "foreground_processes": [{"name": "node", "pid": 2}]}})
+        if args[:2] == ("tmux", "send-keys") and args[-1] == "Enter" and len(args) > 3:
+            self.on("tmux", "display-message", "-p", "-t", args[3], stdout="node\n")
+
     def run(self, argv: Sequence[str], *, timeout: float = 10.0, cwd: Path | None = None) -> CommandResult:
         args = tuple(argv)
         self.calls.append(args)
         if args[0] not in self.tools:
             raise ToolMissing(args[0])
+        self._process_starts(args)
         for respond in reversed(self._responders):
             result = respond(args)
             if result is not None:

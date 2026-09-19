@@ -55,8 +55,9 @@ COMMAND_FIELDS = [
     {"key": "port", "kind": "integer", "label": "Port", "optional": True, "min": 1, "max": cfg.MAX_PORT, "example": "3000",
      "help": "The port this process listens on once it is up. Start checks it before typing anything: "
              "already served by this project means skip, held by another project means refuse. "
-             "Stop waits for it to close after Ctrl-C. Leave empty for processes that do not listen, "
-             "such as a file watcher; those are skipped when their tab is still busy."},
+             "Stop waits for it to close after Ctrl-C. Empty means the page's port when this is the "
+             "project's only process and a local page is set; otherwise no port, which is right for a "
+             "file watcher (skipped while its tab is busy)."},
     {"key": "cwd", "kind": "path", "label": "Sub-folder", "optional": True, "relative": True, "example": "client",
      "help": "Run the process from this folder inside the project instead of the project root. "
              "For monorepos: client for the frontend, server for the API. Empty means the project root."},

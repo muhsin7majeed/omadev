@@ -25,8 +25,11 @@ action:
 | apps | open each helper app | a window for it is open (focused instead) |
 
 A port held by **another** project is refused, not reused, so Start never
-opens the page of the wrong project. Pressing Start twice is harmless, and
-Start after a reboot resumes rather than duplicates.
+opens the page of the wrong project. Two projects that both want port 3000
+cannot run at once; Stop the one and Start the other. A process that dies
+right after starting, because its port was taken or the command is missing,
+is reported as failed rather than started. Pressing Start twice is harmless,
+and Start after a reboot resumes rather than duplicates.
 
 **Stop** interrupts each process with Ctrl-C, waits for its port to close,
 closes its tab, runs any stop commands (for example `docker compose down`),
@@ -41,12 +44,19 @@ focused where it is and never moved.
 
 ```bash
 omarchy plugin add https://github.com/muhsin7majeed/omadev.git
+```
+
+Omarchy warns that plugins run unsandboxed, clones the repository, and asks
+whether to enable the plugin. Say yes and the rocket appears in the bar's
+right section. If you said no, or want to enable it later:
+
+```bash
 omarchy plugin enable potato.omadev
 ```
 
-The plugin appears in the bar's right section. Everything runs from the
-plugin directory; nothing else is installed. Requirements: Python 3.11 or
-newer (already present on Omarchy), plus herdr or tmux if you use one.
+Everything runs from the plugin directory; nothing else is installed.
+Requirements: Python 3.11 or newer (already present on Omarchy), plus herdr
+or tmux if you use one. Updates come with `omarchy plugin update`.
 
 ## Configure a project
 

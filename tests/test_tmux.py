@@ -24,6 +24,14 @@ class TmuxTests(unittest.TestCase):
         self.assertFalse(self.t.has_session("kadha"))
         self.assertEqual(self.runner.calls[-1], ("tmux", "has-session", "-t", "=kadha"))
 
+    def test_find_session_ignores_case_after_exact_match(self) -> None:
+        self.runner.on("tmux", "has-session", returncode=1)
+        self.runner.on("tmux", "list-sessions", stdout="0\nkadha\nother\n")
+        self.assertEqual(self.t.find_session("Kadha"), "kadha")
+        self.assertIsNone(self.t.find_session("nope"))
+        self.runner.on("tmux", "has-session", returncode=0)
+        self.assertEqual(self.t.find_session("Kadha"), "Kadha")
+
     def test_windows_and_find(self) -> None:
         self.runner.on("tmux", "list-windows", stdout="kadha:0\tbash\nkadha:1\tomadev-app\n")
         self.assertEqual(self.t.windows("kadha"), [("kadha:0", "bash"), ("kadha:1", "omadev-app")])

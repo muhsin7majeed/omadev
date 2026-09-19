@@ -120,8 +120,15 @@ class Herdr:
         return [Workspace(id=str(w["workspace_id"]), label=str(w.get("label", ""))) for w in items if "workspace_id" in w]
 
     def find_workspace(self, label: str) -> Workspace | None:
-        for workspace in self.workspaces():
+        """The workspace with this label, exact match first, else ignoring
+        case: a project called Kadha should find the workspace called kadha
+        rather than create a second one."""
+        workspaces = self.workspaces()
+        for workspace in workspaces:
             if workspace.label == label:
+                return workspace
+        for workspace in workspaces:
+            if workspace.label.casefold() == label.casefold():
                 return workspace
         return None
 

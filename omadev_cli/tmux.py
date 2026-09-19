@@ -53,6 +53,19 @@ class Tmux:
         # The '=' prefix asks for an exact name instead of a prefix match.
         return self._run("has-session", "-t", f"={session}", check=False).ok
 
+    def find_session(self, session: str) -> str | None:
+        """The existing session named like this, exact match first, else
+        ignoring case; None when there is none."""
+        if self.has_session(session):
+            return session
+        result = self._run("list-sessions", "-F", "#{session_name}", check=False)
+        if not result.ok:
+            return None
+        for name in result.stdout.split():
+            if name.casefold() == session.casefold():
+                return name
+        return None
+
     def new_session(self, session: str, cwd: Path) -> None:
         self._run("new-session", "-d", "-s", session, "-c", str(cwd))
 

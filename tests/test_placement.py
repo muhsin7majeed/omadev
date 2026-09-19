@@ -156,7 +156,25 @@ class PlacementTests(unittest.TestCase):
                          commands=[{"name": "app", "run": "docker compose up", "port": 3000}])
         results = self.start(config)
         self.assertEqual(results["browser"].status, steps.STARTED)
-        self.assertIn("did not appear", results["browser"].detail)
+        self.assertIn("as a tab in the browser", results["browser"].detail)
+        self.assertEqual(self.moves(), [])
+        # No waiting for a window that will never come: the clock did not advance for it.
+        self.assertLess(self.fake.now, steps.PLACE_TIMEOUT)
+
+    def test_shared_editor_gets_placed_only_when_it_opens_a_new_window(self) -> None:
+        editor = {"launch": ["zed", "{path}"], "launch_shared": ["zed", "--add", "{path}"],
+                  "match": r"^dev\.zed\.Zed$", "share_window": True}
+        config = project(self.path, editor=editor, workspaces={"editor": 3})
+        # No Zed window anywhere: --add opens a fresh one, which is placed.
+        self.appear_on_launch("zed", window(address="0xe6", cls="dev.zed.Zed", title="other — x"))
+        results = self.start(config)
+        self.assertEqual(results["editor"].status, steps.STARTED)
+        self.assertIn("moved to workspace 3", results["editor"].detail)
+        # A Zed window exists (showing another project): the project joins it, nothing moves.
+        self.runner.calls.clear()
+        results = self.start(config)
+        self.assertEqual(results["editor"].status, steps.STARTED)
+        self.assertIn("into the open editor window", results["editor"].detail)
         self.assertEqual(self.moves(), [])
 
     def test_new_terminal_is_found_through_its_client_and_moved(self) -> None:

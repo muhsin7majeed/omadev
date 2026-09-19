@@ -96,7 +96,11 @@ Output is human text by default and one JSON document with `--json`. Exit code
 Start order for a sequential project (`mode: "parallel"` opens the editor and
 apps before waiting for the URL):
 
-1. `workspace` — herdr workspace or tmux session for the project path. If the
+0. `page` (only on failure) — before anything is typed, the page's local port
+   is checked; held by another project fails the run and the processes, wait
+   and browser steps are skipped.
+1. `workspace` — herdr workspace or tmux session for the project path,
+   matched by label exactly, else ignoring case (`Kadha` finds `kadha`). If the
    herdr server is down, a terminal running `herdr` is opened first (`herdr` step).
    With `multiplexer: none` this step is skipped; processes get terminal windows.
 2. `setup:<name>` — each setup command in the `omadev-setup` tab, waiting
@@ -104,7 +108,10 @@ apps before waiting for the URL):
    present. A failure marks the run and the processes, wait and page are skipped.
 3. `command:<name>` — each process in its own tab (herdr) or window (tmux)
    named `omadev-<name>`, only if its port is not already listening and the
-   pane is an idle shell. A busy pane is never typed into.
+   pane is an idle shell. A busy pane is never typed into. A process with no
+   port borrows the page's port when it is the project's only process
+   (`Project.command_port`). After sending, Start waits 1.5s and reports a
+   process that is already back at the prompt as failed ("exited right away").
 4. `terminal` — focus the terminal window hosting the multiplexer client,
    found by walking the client's parent pids to a Hyprland window; else open
    one. `terminal:focus` then shows the project's workspace in herdr.
@@ -198,7 +205,10 @@ new *and* matches the step's predicate (editor class + folder in title, app
 match, web app class, the terminal via its multiplexer client's pid), then
 `hl.dsp.window.move({ window = "address:…", workspace = N, silent = true })`.
 Anything that already existed is focused where it is and never moved. A
-window that never appears is reported in the step detail, not failed. Exec
+window that never appears is reported in the step detail, not failed. In
+tab mode nothing is waited for when a browser window already exists (the tab
+joins it); a shared editor is placed only when no editor window exists yet
+(its `--add` then opens a fresh one). Exec
 rules such as `[workspace 3 silent]` were not used because Omarchy launches
 through `uwsm-app`, which detaches the window's process from the launching
 pid that Hyprland tracks.

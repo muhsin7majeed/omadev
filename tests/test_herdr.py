@@ -35,6 +35,7 @@ class HerdrTests(unittest.TestCase):
         self.runner.on_json("herdr", "workspace", "list", result=WORKSPACES)
         found = self.h.find_workspace("kadha")
         self.assertEqual(found, herdr.Workspace("w5", "kadha"))
+        self.assertEqual(self.h.find_workspace("Kadha"), herdr.Workspace("w5", "kadha"))
         self.assertIsNone(self.h.find_workspace("nope"))
         self.assertTrue(self.h.server_running())
 

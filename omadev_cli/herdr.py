@@ -153,9 +153,16 @@ class Herdr:
                 return tab
         return None
 
-    def create_tab(self, workspace_id: str, cwd: Path, label: str) -> tuple[Tab, str]:
-        """Create a tab and return it with the id of its root pane."""
-        payload = self._call("tab", "create", "--workspace", workspace_id, "--cwd", str(cwd), "--label", label, "--no-focus")
+    def create_tab(self, workspace_id: str, cwd: Path, label: str, env: tuple[str, ...] = ()) -> tuple[Tab, str]:
+        """Create a tab and return it with the id of its root pane.
+
+        `env` entries (KEY=VALUE) apply to the shell the tab starts; a tab
+        that already exists keeps the environment it was created with.
+        """
+        args = ["tab", "create", "--workspace", workspace_id, "--cwd", str(cwd), "--label", label, "--no-focus"]
+        for entry in env:
+            args += ["--env", entry]
+        payload = self._call(*args)
         tab = payload.get("tab")
         pane = payload.get("root_pane")
         if not isinstance(tab, dict) or "tab_id" not in tab or not isinstance(pane, dict) or "pane_id" not in pane:

@@ -39,6 +39,17 @@ Column {
     }
   }
 
+  // `visible_if` on a schema field: {key} shows it once that field has a
+  // value, {key, not} once that field's value differs from `not`. Purely
+  // presentational; the CLI validates the same either way.
+  function visibleFor(spec) {
+    var cond = spec.visible_if
+    if (!cond || !cond.key) return true
+    var value = draft[cond.key]
+    if (cond["not"] !== undefined) return String(value === undefined || value === null ? "" : value) !== String(cond["not"])
+    return value !== undefined && value !== null && value !== ""
+  }
+
   width: parent ? parent.width : implicitWidth
   spacing: Style.spacing.lg
 
@@ -118,6 +129,7 @@ Column {
           readonly property string kind: String(modelData.kind || "string")
 
           width: parent.width
+          visible: form.visibleFor(modelData)
           sourceComponent: kind === "list" ? listField : (kind === "object" ? objectField : scalarField)
 
           onLoaded: {

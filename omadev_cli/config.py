@@ -20,23 +20,30 @@ from typing import Any
 from urllib.parse import urlsplit
 
 SCHEMA_VERSION = 1
-MULTIPLEXERS = ("herdr", "tmux")
+MULTIPLEXERS = ("herdr", "tmux", "none")
 BROWSER_MODES = ("webapp", "browser")
 MODES = ("sequential", "parallel")
 MAX_PORT = 65535
 DEFAULT_WAIT_TIMEOUT = 90
 MAX_WAIT_TIMEOUT = 3600
+DEFAULT_SETUP_TIMEOUT = 600
+MAX_WORKSPACE = 99
+
+# Environment entries are KEY=VALUE with a shell-style key.
+ENV_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", re.DOTALL)
 
 # Project and command names become multiplexer labels, window-match patterns
 # and log lines, so they are kept to a short, readable alphabet.
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$")
 
 _PROJECT_FIELDS = frozenset({
-    "name", "path", "multiplexer", "session", "commands", "url", "browser",
-    "editor", "apps", "stop_commands", "mode", "wait_timeout",
+    "name", "path", "multiplexer", "session", "setup", "commands", "url", "browser",
+    "editor", "apps", "stop_commands", "mode", "wait_timeout", "workspaces",
 })
-_COMMAND_FIELDS = frozenset({"name", "run", "port", "cwd"})
-_APP_FIELDS = frozenset({"name", "launch", "match"})
+_COMMAND_FIELDS = frozenset({"name", "run", "port", "cwd", "env"})
+_SETUP_FIELDS = frozenset({"name", "run", "cwd", "unless_exists", "timeout"})
+_APP_FIELDS = frozenset({"name", "launch", "match", "workspace"})
+_WORKSPACES_FIELDS = frozenset({"terminal", "browser", "editor"})
 _EDITOR_FIELDS = frozenset({"launch", "launch_shared", "match", "share_window"})
 _CONFIG_FIELDS = frozenset({"version", "default_browser", "projects"})
 
@@ -81,6 +88,24 @@ class Command:
     run: str
     port: int | None = None
     cwd: str | None = None
+    env: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SetupCommand:
+    """A one-shot command run before the processes, such as `npm install`.
+
+    Runs in the project's setup tab and Start waits for it to finish.
+    `unless_exists` skips it when that path (relative to the project) is
+    already there, which is how `npm install` becomes a no-op once
+    `node_modules` exists.
+    """
+
+    name: str
+    run: str
+    cwd: str | None = None
+    unless_exists: str | None = None
+    timeout: int = DEFAULT_SETUP_TIMEOUT
 
 
 @dataclass(frozen=True)
@@ -89,12 +114,27 @@ class App:
 
     `launch` is an argv list. `match` is a regular expression tested against
     the Hyprland window class and title to find an already open instance.
-    Both may use the placeholders {path} and {name}.
+    Both may use the placeholders {path} and {name}. `workspace` is the
+    Hyprland workspace a newly opened window is moved to.
     """
 
     name: str
     launch: tuple[str, ...]
     match: str
+    workspace: int | None = None
+
+
+@dataclass(frozen=True)
+class Workspaces:
+    """Hyprland workspaces for windows that Start opens itself.
+
+    A window that is already open, on whatever workspace, is focused where
+    it is; only new windows are moved. None means "wherever it opens".
+    """
+
+    terminal: int | None = None
+    browser: int | None = None
+    editor: int | None = None
 
 
 @dataclass(frozen=True)
@@ -134,6 +174,7 @@ class Project:
     path: Path
     multiplexer: str = "herdr"
     session: str | None = None
+    setup: tuple[SetupCommand, ...] = ()
     commands: tuple[Command, ...] = ()
     url: str | None = None
     browser: str | None = None
@@ -142,6 +183,7 @@ class Project:
     stop_commands: tuple[str, ...] = ()
     mode: str = "sequential"
     wait_timeout: int = DEFAULT_WAIT_TIMEOUT
+    workspaces: Workspaces = Workspaces()
 
     @property
     def session_name(self) -> str:
@@ -255,22 +297,71 @@ def _relative_dir(value: Any, where: str) -> str:
     return text
 
 
+def _short_name(value: Any, where: str) -> str:
+    name = _string(value, where)
+    if not NAME_PATTERN.match(name):
+        raise ConfigError(where, "may use letters, digits, space, dot, underscore and dash, up to 64 characters")
+    return name
+
+
+def _workspace(value: Any, where: str) -> int:
+    number = _expect(value, where, int, "an integer")
+    if not 1 <= number <= MAX_WORKSPACE:
+        raise ConfigError(where, f"must be a Hyprland workspace number between 1 and {MAX_WORKSPACE}")
+    return number
+
+
+def _env_list(value: Any, where: str) -> tuple[str, ...]:
+    entries = _string_list(value, where)
+    for i, entry in enumerate(entries):
+        if not ENV_PATTERN.match(entry):
+            raise ConfigError(f"{where}[{i}]", "must look like KEY=value")
+    return entries
+
+
 def _parse_command(raw: Any, where: str, warnings: list[str]) -> Command:
     data = _expect(raw, where, dict, "an object")
     _warn_unknown(data, _COMMAND_FIELDS, where, warnings)
     if "name" not in data or "run" not in data:
         raise ConfigError(where, "needs 'name' and 'run'")
-    name = _string(data["name"], f"{where}.name")
-    if not NAME_PATTERN.match(name):
-        raise ConfigError(f"{where}.name", "may use letters, digits, space, dot, underscore and dash, up to 64 characters")
     port = data.get("port")
     cwd = data.get("cwd")
     return Command(
-        name=name,
+        name=_short_name(data["name"], f"{where}.name"),
         run=_string(data["run"], f"{where}.run"),
         port=None if port is None else _port(port, f"{where}.port"),
         cwd=None if cwd is None else _relative_dir(cwd, f"{where}.cwd"),
+        env=_env_list(data.get("env", []), f"{where}.env"),
     )
+
+
+def _parse_setup(raw: Any, where: str, warnings: list[str]) -> SetupCommand:
+    data = _expect(raw, where, dict, "an object")
+    _warn_unknown(data, _SETUP_FIELDS, where, warnings)
+    if "name" not in data or "run" not in data:
+        raise ConfigError(where, "needs 'name' and 'run'")
+    cwd = data.get("cwd")
+    unless = data.get("unless_exists")
+    timeout = _expect(data.get("timeout", DEFAULT_SETUP_TIMEOUT), f"{where}.timeout", int, "an integer")
+    if not 1 <= timeout <= MAX_WAIT_TIMEOUT:
+        raise ConfigError(f"{where}.timeout", f"must be between 1 and {MAX_WAIT_TIMEOUT} seconds")
+    return SetupCommand(
+        name=_short_name(data["name"], f"{where}.name"),
+        run=_string(data["run"], f"{where}.run"),
+        cwd=None if cwd is None else _relative_dir(cwd, f"{where}.cwd"),
+        unless_exists=None if unless is None else _relative_dir(unless, f"{where}.unless_exists"),
+        timeout=timeout,
+    )
+
+
+def _parse_workspaces(raw: Any, where: str, warnings: list[str]) -> Workspaces:
+    data = _expect(raw, where, dict, "an object")
+    _warn_unknown(data, _WORKSPACES_FIELDS, where, warnings)
+    values = {}
+    for key in ("terminal", "browser", "editor"):
+        value = data.get(key)
+        values[key] = None if value is None else _workspace(value, f"{where}.{key}")
+    return Workspaces(**values)
 
 
 def _parse_editor(raw: Any, where: str, warnings: list[str]) -> Editor:
@@ -303,10 +394,12 @@ def _parse_app(raw: Any, where: str, warnings: list[str]) -> App:
     launch = _string_list(data["launch"], f"{where}.launch")
     if not launch:
         raise ConfigError(f"{where}.launch", "must not be empty")
+    workspace = data.get("workspace")
     return App(
         name=_string(data["name"], f"{where}.name"),
         launch=launch,
         match=_regex(data["match"], f"{where}.match"),
+        workspace=None if workspace is None else _workspace(workspace, f"{where}.workspace"),
     )
 
 
@@ -340,6 +433,13 @@ def _parse_project(raw: Any, where: str, warnings: list[str], *, check_paths: bo
             raise ConfigError(f"{where}.commands", f"duplicate command name '{command.name}'")
         seen_commands.add(command.name)
 
+    setup = tuple(
+        _parse_setup(item, f"{where}.setup[{i}]", warnings)
+        for i, item in enumerate(_expect(data.get("setup", []), f"{where}.setup", list, "a list"))
+    )
+    workspaces_raw = data.get("workspaces")
+    workspaces = Workspaces() if workspaces_raw is None else _parse_workspaces(workspaces_raw, f"{where}.workspaces", warnings)
+
     apps = tuple(
         _parse_app(item, f"{where}.apps[{i}]", warnings)
         for i, item in enumerate(_expect(data.get("apps", []), f"{where}.apps", list, "a list"))
@@ -354,6 +454,7 @@ def _parse_project(raw: Any, where: str, warnings: list[str], *, check_paths: bo
         path=path,
         multiplexer=_choice(data.get("multiplexer", "herdr"), f"{where}.multiplexer", MULTIPLEXERS),
         session=None if session is None else _string(session, f"{where}.session"),
+        setup=setup,
         commands=commands,
         url=None if url is None else _url(url, f"{where}.url"),
         browser=None if browser is None else _choice(browser, f"{where}.browser", BROWSER_MODES),
@@ -362,6 +463,7 @@ def _parse_project(raw: Any, where: str, warnings: list[str], *, check_paths: bo
         stop_commands=_string_list(data.get("stop_commands", []), f"{where}.stop_commands"),
         mode=_choice(data.get("mode", "sequential"), f"{where}.mode", MODES),
         wait_timeout=wait_timeout,
+        workspaces=workspaces,
     )
 
 
@@ -455,10 +557,28 @@ def project_to_dict(item: Project) -> dict[str, Any]:
             data["port"] = item.port
         if item.cwd is not None:
             data["cwd"] = item.cwd
+        if item.env:
+            data["env"] = list(item.env)
+        return data
+
+    def setup(item: SetupCommand) -> dict[str, Any]:
+        data: dict[str, Any] = {"name": item.name, "run": item.run}
+        if item.cwd is not None:
+            data["cwd"] = item.cwd
+        if item.unless_exists is not None:
+            data["unless_exists"] = item.unless_exists
+        if item.timeout != DEFAULT_SETUP_TIMEOUT:
+            data["timeout"] = item.timeout
         return data
 
     def app(item: App) -> dict[str, Any]:
-        return {"name": item.name, "launch": list(item.launch), "match": item.match}
+        data: dict[str, Any] = {"name": item.name, "launch": list(item.launch), "match": item.match}
+        if item.workspace is not None:
+            data["workspace"] = item.workspace
+        return data
+
+    def workspaces(item: Workspaces) -> dict[str, Any]:
+        return {key: value for key, value in (("terminal", item.terminal), ("browser", item.browser), ("editor", item.editor)) if value is not None}
 
     def editor(item: Editor) -> dict[str, Any]:
         data: dict[str, Any] = {"launch": list(item.launch)}
@@ -480,8 +600,13 @@ def project_to_dict(item: Project) -> dict[str, Any]:
         data["wait_timeout"] = item.wait_timeout
     if item.session is not None:
         data["session"] = item.session
+    if item.setup:
+        data["setup"] = [setup(s) for s in item.setup]
     if item.commands:
         data["commands"] = [command(c) for c in item.commands]
+    placed = workspaces(item.workspaces)
+    if placed:
+        data["workspaces"] = placed
     if item.url is not None:
         data["url"] = item.url
     if item.browser is not None:

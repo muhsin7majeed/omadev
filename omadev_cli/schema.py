@@ -22,7 +22,10 @@ Field kinds the form knows how to render:
   list     repeated `item`s, each a scalar kind or an object with `fields`
 
 `optional: true` means the field may be left empty; the CLI turns an empty
-value into "unset". Everything else is required.
+value into "unset". Everything else is required. `visible_if` hides a field
+in the form until another field has a value (`{"key": "url"}`) or has a
+value other than one (`{"key": "multiplexer", "not": "none"}`); it changes
+nothing about validation.
 """
 
 from __future__ import annotations
@@ -31,19 +34,40 @@ from . import config as cfg
 
 COMMAND_FIELDS = [
     {"key": "name", "kind": "string", "label": "Name", "example": "app",
-     "help": "A short label for this command. Its terminal tab is called omadev-<name>, "
+     "help": "A short label for this process. Its terminal tab is called omadev-<name>, "
              "which is how Start finds it again and Stop knows what to interrupt."},
     {"key": "run", "kind": "string", "label": "Command", "example": "docker compose up",
      "help": "Typed into the tab exactly as written and followed by Enter, so anything your shell "
-             "accepts works: npm run dev, docker compose up, rails s, python manage.py runserver."},
+             "accepts works: npm run dev, docker compose up, rails s, cargo watch -x run."},
     {"key": "port", "kind": "integer", "label": "Port", "optional": True, "min": 1, "max": cfg.MAX_PORT, "example": "3000",
-     "help": "The port this command listens on once it is up. Start checks it before typing anything: "
+     "help": "The port this process listens on once it is up. Start checks it before typing anything: "
              "already served by this project means skip, held by another project means refuse. "
-             "Stop waits for it to close after Ctrl-C. Leave empty for commands that do not listen, "
-             "such as a file watcher."},
+             "Stop waits for it to close after Ctrl-C. Leave empty for processes that do not listen, "
+             "such as a file watcher; those are skipped when their tab is still busy."},
     {"key": "cwd", "kind": "path", "label": "Sub-folder", "optional": True, "relative": True, "example": "client",
-     "help": "Run the command from this folder inside the project instead of the project root. "
+     "help": "Run the process from this folder inside the project instead of the project root. "
              "For monorepos: client for the frontend, server for the API. Empty means the project root."},
+    {"key": "env", "kind": "list", "label": "Environment", "item": {"kind": "string"}, "example": "PORT=3000",
+     "help": "KEY=value entries set in the tab's shell when the tab is created. A tab that already "
+             "exists keeps the environment it was created with."},
+]
+
+SETUP_FIELDS = [
+    {"key": "name", "kind": "string", "label": "Name", "example": "install",
+     "help": "A short label shown in the step results."},
+    {"key": "run", "kind": "string", "label": "Command", "example": "npm install",
+     "help": "Run to completion before the processes start, in the project's setup tab, where you can "
+             "watch it. Start waits until the shell prompt is back."},
+    {"key": "cwd", "kind": "path", "label": "Sub-folder", "optional": True, "relative": True, "example": "client",
+     "help": "Run from this folder inside the project. Empty means the project root."},
+    {"key": "unless_exists", "kind": "path", "label": "Skip if this exists", "optional": True, "relative": True,
+     "example": "node_modules",
+     "help": "A file or folder, relative to the project, whose presence means this step is done. "
+             "With node_modules here, npm install runs on a fresh clone and is skipped afterwards."},
+    {"key": "timeout", "kind": "integer", "label": "Timeout (seconds)", "optional": True, "min": 1, "max": cfg.MAX_WAIT_TIMEOUT,
+     "example": str(cfg.DEFAULT_SETUP_TIMEOUT),
+     "help": "How long Start waits for this command. Default 600. When it runs out the step fails and "
+             "the processes are not started."},
 ]
 
 APP_FIELDS = [
@@ -57,6 +81,20 @@ APP_FIELDS = [
      "help": "A regular expression tested against the window class and title (case-insensitive). "
              "When a window matches, Start focuses it instead of launching another. "
              "Find the class with: hyprctl clients -j | jq '.[].class'"},
+    {"key": "workspace", "kind": "integer", "label": "Workspace", "optional": True, "min": 1, "max": cfg.MAX_WORKSPACE, "example": "4",
+     "help": "Hyprland workspace a newly opened window is moved to. A window that is already open stays "
+             "where it is and is focused there."},
+]
+
+WORKSPACES_FIELDS = [
+    {"key": "terminal", "kind": "integer", "label": "Terminal", "optional": True, "min": 1, "max": cfg.MAX_WORKSPACE, "example": "2",
+     "help": "Where a terminal that Start opens goes. A terminal that is already attached stays put."},
+    {"key": "browser", "kind": "integer", "label": "Browser", "optional": True, "min": 1, "max": cfg.MAX_WORKSPACE, "example": "1",
+     "help": "Where a new browser window or web app window goes. A tab opened in an existing browser "
+             "window stays with that window."},
+    {"key": "editor", "kind": "integer", "label": "Editor", "optional": True, "min": 1, "max": cfg.MAX_WORKSPACE, "example": "3",
+     "help": "Where a new editor window goes. Needs the editor's window class match to find the window. "
+             "With a shared editor window, the existing window stays where it is."},
 ]
 
 EDITOR_FIELDS = [
@@ -97,21 +135,30 @@ PROJECT_FIELDS = [
      "help": "The project directory. Commands run here, the editor opens it, and the multiplexer "
              "workspace is created here. ~ is allowed."},
     {"key": "multiplexer", "kind": "enum", "label": "Terminal multiplexer", "default": "herdr",
-     "options": [{"value": "herdr", "label": "herdr"}, {"value": "tmux", "label": "tmux"}],
-     "help": "Where the commands run. herdr: one workspace per project, one tab per command. "
-             "tmux: one session per project, one window per command. Start reuses an existing "
-             "workspace or session and never types into a pane that is busy."},
+     "options": [{"value": "herdr", "label": "herdr"}, {"value": "tmux", "label": "tmux"},
+                 {"value": "none", "label": "None: plain terminal windows"}],
+     "help": "Where the processes run. herdr: one workspace per project, one tab per process. "
+             "tmux: one session per project, one window per process. None: each process gets its own "
+             "terminal window, which Stop closes rather than interrupting gently. Start reuses what "
+             "exists and never types into a pane that is busy."},
     {"key": "session", "kind": "string", "label": "Workspace or session name", "optional": True, "example": "kadha",
+     "visible_if": {"key": "multiplexer", "not": "none"},
      "help": "Only needed when your existing herdr workspace or tmux session is not named after the "
              "project. Start attaches to the workspace with this label instead of creating one."},
-    {"key": "commands", "kind": "list", "label": "Commands", "item": {"kind": "object", "fields": COMMAND_FIELDS},
+    {"key": "setup", "kind": "list", "label": "Setup commands", "item": {"kind": "object", "fields": SETUP_FIELDS},
+     "help": "One-shot commands run to completion before the processes: npm install, docker compose pull, "
+             "make deps. Each can be skipped when a file or folder already exists, so they cost nothing "
+             "once done."},
+    {"key": "commands", "kind": "list", "label": "Processes", "item": {"kind": "object", "fields": COMMAND_FIELDS},
      "help": "Long-running processes the project needs: dev servers, watchers, databases. Each gets its "
-             "own tab. Start sends a command only if its port is not already served; Stop interrupts "
+             "own tab. Start sends a process only if its port is not already served; Stop interrupts "
              "it with Ctrl-C, waits for the port to close, and closes the tab."},
-    {"key": "url", "kind": "url", "label": "URL", "optional": True, "example": "http://localhost:3000",
-     "help": "The page to open once the project is up. Start waits until this URL answers HTTP, "
-             "not just until the port is open, then opens the browser. Also shown as up or down in the list."},
-    {"key": "browser", "kind": "enum", "label": "Open the URL as", "optional": True,
+    {"key": "url", "kind": "url", "label": "Page to open", "optional": True, "example": "http://localhost:3000",
+     "help": "A page to open once the project is up. Start waits until it answers HTTP, not just until "
+             "the port is open, then opens it. Also shown as up or down in the list. Leave empty for "
+             "projects without a page."},
+    {"key": "browser", "kind": "enum", "label": "Open the page as", "optional": True,
+     "visible_if": {"key": "url"},
      "options": [{"value": "", "label": "Default (web app window)"}, {"value": "browser", "label": "Tab in the browser"},
                  {"value": "webapp", "label": "Web app window"}],
      "help": "Tab in the browser: opened with xdg-open in your running browser; a second Start cannot "
@@ -139,9 +186,13 @@ PROJECT_FIELDS = [
              "follow when the URL is ready."},
     {"key": "wait_timeout", "kind": "integer", "label": "Wait timeout (seconds)", "default": cfg.DEFAULT_WAIT_TIMEOUT,
      "min": 1, "max": cfg.MAX_WAIT_TIMEOUT, "example": str(cfg.DEFAULT_WAIT_TIMEOUT),
-     "help": "How long Start waits for the URL to answer before giving up on the browser step, and how "
-             "long Stop waits for a command to end after Ctrl-C before leaving its tab open. "
+     "help": "How long Start waits for the page to answer before giving up on the browser step, and how "
+             "long Stop waits for a process to end after Ctrl-C before leaving its tab open. "
              "Raise it for docker builds that take minutes."},
+    {"key": "workspaces", "kind": "object", "label": "Hyprland workspaces", "optional": True, "fields": WORKSPACES_FIELDS,
+     "help": "Where windows go when Start opens them fresh: browser on 1, terminal on 2, editor on 3, "
+             "for example. Anything already open, on any workspace, is focused where it is and never "
+             "moved. Leave a field empty to let a window open wherever Hyprland puts it."},
 ]
 
 

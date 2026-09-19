@@ -98,20 +98,26 @@ apps before waiting for the URL):
 
 1. `workspace` — herdr workspace or tmux session for the project path. If the
    herdr server is down, a terminal running `herdr` is opened first (`herdr` step).
-2. `command:<name>` — each command in its own tab (herdr) or window (tmux)
+   With `multiplexer: none` this step is skipped; processes get terminal windows.
+2. `setup:<name>` — each setup command in the `omadev-setup` tab, waiting
+   until the pane is an idle shell again, unless its `unless_exists` path is
+   present. A failure marks the run and the processes, wait and page are skipped.
+3. `command:<name>` — each process in its own tab (herdr) or window (tmux)
    named `omadev-<name>`, only if its port is not already listening and the
    pane is an idle shell. A busy pane is never typed into.
-3. `terminal` — focus the terminal window hosting the multiplexer client,
+4. `terminal` — focus the terminal window hosting the multiplexer client,
    found by walking the client's parent pids to a Hyprland window; else open
    one. `terminal:focus` then shows the project's workspace in herdr.
-4. `wait` — wait until the URL answers HTTP (`wait_timeout`). Any status
+5. `wait` — wait until the URL answers HTTP (`wait_timeout`). Any status
    code counts; an open port alone does not, because docker binds the port
    before the app inside is ready.
-5. `browser` — `webapp`: focus the app window by class, else launch.
+6. `browser` — `webapp`: focus the app window by class, else launch.
    `browser`: `xdg-open`, only when the URL was not already answering before this run.
-6. `editor` — focus a window matching the editor's class whose title contains
+7. `editor` — focus a window matching the editor's class whose title contains
    the project folder name as a whole word; else launch.
-7. `app:<name>` — focus a window matching `match`; else launch.
+8. `app:<name>` — focus a window matching `match`; else launch.
+
+Steps 4, 6, 7 and 8 place newly opened windows per `workspaces` / `apps[].workspace`.
 
 Stop order (`steps.stop`), leaving the workspace, the terminal and browser
 tabs alone because they are the user's or cannot be told apart:
@@ -172,16 +178,34 @@ Per project:
 |-------|---------|
 | `name` | unique; letters, digits, space, `. _ -`, up to 64 chars |
 | `path` | project directory, `~` allowed |
-| `multiplexer` | `herdr` (default) or `tmux` |
+| `multiplexer` | `herdr` (default), `tmux`, or `none` (each process in its own terminal window with class `omadev.<project>.<name>`) |
 | `session` | workspace label or tmux session name; defaults to `name` |
-| `commands` | list of `{name, run, port?, cwd?}`; `cwd` is relative, inside the project |
-| `url` | http(s) URL to wait for and open |
+| `setup` | list of `{name, run, cwd?, unless_exists?, timeout?}`; one-shot, run to completion in the `omadev-setup` tab before the processes; skipped when `unless_exists` (relative path) exists; default timeout 600s; a failure holds the processes and the page |
+| `commands` | list of `{name, run, port?, cwd?, env?}`; `cwd` is relative, inside the project; `env` is `KEY=value` entries applied when the tab is created |
+| `url` | http(s) page to wait for and open |
 | `browser` | `webapp` or `browser`; overrides `default_browser` |
 | `editor` | `{launch: argv, match?: class regex, launch_shared?: argv, share_window?: bool}`; default is `omarchy-launch-editor {path}`. With `share_window` Start uses `launch_shared` (Zed, VS Code, Cursor: `--add {path}`) to put the project into the open editor window, and Stop leaves that window alone |
-| `apps` | list of `{name, launch: argv, match: regex}` |
-| `stop_commands` | commands run on Stop (planned) |
+| `apps` | list of `{name, launch: argv, match: regex, workspace?}` |
+| `stop_commands` | commands run on Stop, split with shlex, no shell |
 | `mode` | `sequential` (default) or `parallel` |
 | `wait_timeout` | seconds to wait for the URL, default 90 |
+| `workspaces` | `{terminal?, browser?, editor?}` Hyprland workspace numbers for windows Start opens itself |
+
+**Placement** (`Run.launch_placed`): a window Start opens can be moved to a
+workspace. Before launching, the addresses of all windows are recorded; after
+launching, Start polls `hyprctl clients` for up to 15s for a window that is
+new *and* matches the step's predicate (editor class + folder in title, app
+match, web app class, the terminal via its multiplexer client's pid), then
+`hl.dsp.window.move({ window = "address:…", workspace = N, silent = true })`.
+Anything that already existed is focused where it is and never moved. A
+window that never appears is reported in the step detail, not failed. Exec
+rules such as `[workspace 3 silent]` were not used because Omarchy launches
+through `uwsm-app`, which detaches the window's process from the launching
+pid that Hyprland tracks.
+
+**Schema `visible_if`** hides a form field until another field is set
+(`{"key": "url"}`) or differs from a value (`{"key": "multiplexer", "not": "none"}`).
+Presentation only; validation is unchanged.
 
 `launch` and `match` strings may use `{path}` and `{name}`; substitution is
 plain replacement so regex braces survive.

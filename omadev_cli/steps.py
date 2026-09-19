@@ -1,4 +1,4 @@
-"""Start a project as a series of check-then-act steps.
+"""Start and stop a project as a series of check-then-act steps.
 
 Every step first looks at what already exists and only then acts, so
 pressing Start twice is harmless: the second run finds everything in place
@@ -8,15 +8,23 @@ changed and every action is reported as `planned`.
 Order for a sequential project:
 
   workspace  -> ensure the herdr workspace or tmux session exists
-  command:*  -> send each command to its own tab or window, unless its
-                port is already listening or its pane is busy
+               ("none" runs processes in their own terminal windows)
+  setup:*    -> one-shot commands, run to completion, skipped when their
+               `unless_exists` path is present
+  command:*  -> send each process to its own tab or window, unless its
+               port is already served or the pane is busy
   terminal   -> focus the terminal attached to the multiplexer, or open one
-  wait       -> wait until the project URL accepts connections
+  wait       -> wait until the project URL answers HTTP
   browser    -> open or focus the URL
   editor     -> open or focus the editor on the project
   app:*      -> open or focus each helper app
 
 A parallel project opens the editor and apps before waiting for the URL.
+
+Windows that Start opens itself can be placed on a Hyprland workspace
+(`workspaces`, `apps[].workspace`): after launching, Start waits for the new
+window to appear and moves it there silently. A window that already exists
+is focused where it is and never moved.
 """
 
 from __future__ import annotations
@@ -29,7 +37,7 @@ from typing import Callable
 from urllib.parse import urlsplit
 
 from . import hypr, ports
-from .config import Config, Project, url_port
+from .config import Command, Config, Project, SetupCommand, url_port
 from .herdr import Herdr, HerdrError, attach_argv as herdr_attach_argv, client_pids as herdr_client_pids, tab_label
 from .system import Runner, SystemRunner, ToolMissing, gui_argv, http_ok, list_processes, port_open, split_command, wait_for_http
 from .tmux import Tmux, TmuxError, attach_argv as tmux_attach_argv, session_name, window_name
@@ -43,8 +51,11 @@ PLANNED = "planned"
 
 LOCAL_HOST = "localhost"
 SERVER_START_TIMEOUT = 15.0
+PLACE_TIMEOUT = 15.0
+SETUP_TAB = "setup"
 HERDR_INTERRUPT = "ctrl+c"
 TMUX_INTERRUPT = "C-c"
+BROWSER_CLASSES = r"^(brave|chrom|google-chrome|microsoft-edge|vivaldi|opera|helium|firefox|zen|librewolf)"
 
 
 class StepFailure(Exception):
@@ -120,16 +131,22 @@ class PortInspector:
 
 @dataclass(frozen=True)
 class Session:
-    """The multiplexer container a project lives in."""
+    """The container a project's processes live in."""
 
-    kind: str          # "herdr" or "tmux"
-    id: str            # herdr workspace id, or tmux session name
+    kind: str          # "herdr", "tmux" or "none"
+    id: str            # herdr workspace id, tmux session name, or "" for none
     created: bool      # True when this run created it (or would, in a dry run)
 
 
 def fill(text: str, project: Project) -> str:
     """Substitute {path} and {name}. Plain replacement, so regex braces survive."""
     return text.replace("{path}", str(project.path)).replace("{name}", project.name)
+
+
+def shell_line(cwd: Path, run: str) -> str:
+    """One shell line that runs `run` from `cwd`, for tabs whose cwd differs."""
+    quoted = "'" + str(cwd).replace("'", "'\\''") + "'"
+    return f"cd {quoted} && {run}"
 
 
 class Run:
@@ -172,6 +189,10 @@ class Run:
             self._windows = self.s.windows()
         return self._windows
 
+    def refresh_windows(self) -> list[hypr.Window]:
+        self._windows = self.s.windows()
+        return self._windows
+
     def focus(self, step: str, window: hypr.Window, what: str) -> bool:
         return self.act(step, f"focus {what} ({window.label})", lambda: hypr.focus(self.s.runner, window), status=FOCUSED)
 
@@ -186,10 +207,48 @@ class Run:
             self.s.sleep(0.5)
         return True
 
+    # ------------------------------------------------------------ placement
+
+    def launch_placed(self, step: str, detail: str, argv: list[str], *, workspace: int | None,
+                      appears: Callable[[hypr.Window], bool], cwd: Path | None = None) -> None:
+        """Detach `argv`; when `workspace` is set, wait for the window it opens
+        and move it there. The window is recognised by `appears` and by not
+        having existed before the launch."""
+        if workspace is None:
+            self.act(step, detail, lambda: self.s.runner.detach(argv, cwd=cwd))
+            return
+        if self.dry_run:
+            self.record(step, PLANNED, f"{detail}, on workspace {workspace}")
+            return
+        before = {w.address for w in self.windows()}
+
+        def find_new() -> hypr.Window | None:
+            return hypr.first(self.refresh_windows(), lambda w: w.address not in before and appears(w))
+
+        found: dict[str, hypr.Window | None] = {"window": None}
+
+        def launch_and_move() -> None:
+            self.s.runner.detach(argv, cwd=cwd)
+            self.wait_until(lambda: (found.__setitem__("window", find_new()) or found["window"] is not None), PLACE_TIMEOUT)
+            if found["window"] is not None:
+                hypr.move_to_workspace(self.s.runner, found["window"], workspace)
+
+        try:
+            launch_and_move()
+        except StepError as exc:
+            self.record(step, FAILED, f"{detail}: {exc}")
+            return
+        if found["window"] is None:
+            self.record(step, STARTED, f"{detail}; its window did not appear within {PLACE_TIMEOUT:g}s, so it was not moved to workspace {workspace}")
+        else:
+            self.record(step, STARTED, f"{detail}, moved to workspace {workspace}")
+
     # ------------------------------------------------------------- lookups
 
     def find_session(self) -> Session | None:
         """The project's existing workspace or session, without creating it."""
+        if self.project.multiplexer == "none":
+            return Session("none", "", created=False)
         if self.project.multiplexer == "herdr":
             herdr = self.s.herdr
             if not herdr.available() or not herdr.server_running():
@@ -207,19 +266,34 @@ class Run:
             return None
         pattern = fill(editor.match, self.project)
         folder = self.project.path.name
-        return hypr.first(self.windows(), lambda w: hypr.class_matches(w, pattern) and hypr.title_has_word(w, folder))
+        return hypr.first(self.windows(), self.editor_predicate(pattern, folder))
+
+    @staticmethod
+    def editor_predicate(pattern: str, folder: str) -> Callable[[hypr.Window], bool]:
+        return lambda w: hypr.class_matches(w, pattern) and hypr.title_has_word(w, folder)
 
     def app_window(self, app) -> hypr.Window | None:
         pattern = fill(app.match, self.project)
         return hypr.first(self.windows(), lambda w: hypr.matches(w, pattern))
 
-    def webapp_window(self) -> hypr.Window | None:
+    def webapp_pattern(self) -> str:
         # Chromium-family app windows carry the URL host in their window
         # class, e.g. "brave-localhost__-Default"; ordinary browser windows
         # are just "brave-browser".
         host = urlsplit(self.project.url or "").hostname or LOCAL_HOST
-        pattern = r"^(brave|chrom|google-chrome|microsoft-edge|vivaldi|opera|helium).*" + re.escape(host)
+        return BROWSER_CLASSES + ".*" + re.escape(host)
+
+    def webapp_window(self) -> hypr.Window | None:
+        pattern = self.webapp_pattern()
         return hypr.first(self.windows(), lambda w: hypr.class_matches(w, pattern))
+
+    def process_window_class(self, name: str) -> str:
+        """Window class of the terminal window a process runs in ("none" mode)."""
+        return hypr.app_id(self.project.name, name)
+
+    def process_window(self, name: str) -> hypr.Window | None:
+        cls = self.process_window_class(name)
+        return hypr.first(self.windows(), lambda w: w.cls == cls or w.initial_class == cls)
 
 
 class StartRun(Run):
@@ -228,12 +302,18 @@ class StartRun(Run):
         # Set when the URL's port belongs to another project: the browser
         # must not open there, not even in a dry run's plan.
         self.url_blocked = False
+        # Set when a setup command failed: processes must not start on a
+        # half-prepared project.
+        self.setup_failed = False
 
     # ------------------------------------------------------------ workspace
 
     def ensure_multiplexer(self) -> Session | None:
         step = "workspace"
         try:
+            if self.project.multiplexer == "none":
+                self.record(step, SKIPPED, "no multiplexer; processes run in their own terminal windows")
+                return Session("none", "", created=False)
             if self.project.multiplexer == "herdr":
                 return self._ensure_herdr(step)
             return self._ensure_tmux(step)
@@ -285,6 +365,115 @@ class StartRun(Run):
             return None
         return Session("tmux", name, created=True)
 
+    # ---------------------------------------------------------------- setup
+
+    def run_setup(self, session: Session | None) -> None:
+        for setup in self.project.setup:
+            step = f"setup:{setup.name}"
+            if self.setup_failed:
+                self.record(step, SKIPPED, "an earlier setup command failed")
+                continue
+            if session is None:
+                self.record(step, SKIPPED, "no workspace to run in")
+                continue
+            if setup.unless_exists is not None and (self.project.path / setup.unless_exists).exists():
+                self.record(step, SKIPPED, f"{setup.unless_exists} exists")
+                continue
+            try:
+                ok = self._run_setup(step, setup, session)
+            except StepError as exc:
+                self.record(step, FAILED, str(exc))
+                ok = False
+            if not ok:
+                self.setup_failed = True
+
+    def _setup_line(self, setup: SetupCommand) -> str:
+        cwd = self.project.path / setup.cwd if setup.cwd else self.project.path
+        return shell_line(cwd, setup.run)
+
+    def _run_setup(self, step: str, setup: SetupCommand, session: Session) -> bool:
+        line = self._setup_line(setup)
+        detail = f"run '{setup.run}' and wait for it to finish"
+        if session.kind == "none":
+            return self._run_setup_in_terminal(step, setup, line, detail)
+        if session.kind == "herdr":
+            ensure_pane, is_idle, send = self._herdr_setup_pane(session)
+        else:
+            ensure_pane, is_idle, send = self._tmux_setup_pane(session)
+        if self.dry_run:
+            self.record(step, PLANNED, detail)
+            return True
+        started = self.s.clock()
+
+        def run_and_wait() -> None:
+            target = ensure_pane()
+            if not is_idle(target):
+                raise StepFailure("the setup tab is busy with something else")
+            send(target, line)
+            if not self.wait_until(lambda: is_idle(target), float(setup.timeout)):
+                raise StepFailure(f"still running after {setup.timeout}s")
+
+        try:
+            run_and_wait()
+        except StepError as exc:
+            self.record(step, FAILED, f"{detail}: {exc}")
+            return False
+        self.record(step, STARTED, f"ran '{setup.run}' in {self.s.clock() - started:.1f}s")
+        return True
+
+    def _herdr_setup_pane(self, session: Session):
+        herdr = self.s.herdr
+        label = tab_label(SETUP_TAB)
+
+        def ensure_pane() -> str:
+            tab = None if session.created else herdr.find_tab(session.id, label)
+            if tab is None:
+                _, pane_id = herdr.create_tab(session.id, self.project.path, label)
+                return pane_id
+            pane = herdr.first_pane(session.id, tab.id)
+            if pane is None:
+                raise StepFailure(f"tab '{label}' has no pane")
+            return pane.id
+
+        return ensure_pane, (lambda pane_id: herdr.foreground(pane_id).idle), herdr.run
+
+    def _tmux_setup_pane(self, session: Session):
+        tmux = self.s.tmux
+        name = window_name(SETUP_TAB)
+
+        def ensure_pane() -> str:
+            target = None if session.created else tmux.find_window(session.id, name)
+            return target if target is not None else tmux.new_window(session.id, name, self.project.path)
+
+        return ensure_pane, tmux.idle, tmux.run
+
+    def _run_setup_in_terminal(self, step: str, setup: SetupCommand, line: str, detail: str) -> bool:
+        cls = self.process_window_class(f"setup-{setup.name}")
+        argv = ["omarchy-launch-tui", f"--app-id={cls}", "bash", "-lc", line]
+        if self.dry_run:
+            self.record(step, PLANNED, f"{detail} in a terminal window")
+            return True
+        if self.process_window(f"setup-{setup.name}") is not None:
+            self.record(step, FAILED, "its terminal window from an earlier run is still open")
+            return False
+        started = self.s.clock()
+
+        def gone() -> bool:
+            self.refresh_windows()
+            return self.process_window(f"setup-{setup.name}") is None
+
+        try:
+            self.s.runner.detach(argv, cwd=self.project.path)
+            # Give the window time to appear before waiting for it to go.
+            self.wait_until(lambda: not gone(), 5.0)
+            if not self.wait_until(gone, float(setup.timeout)):
+                raise StepFailure(f"still running after {setup.timeout}s")
+        except StepError as exc:
+            self.record(step, FAILED, f"{detail}: {exc}")
+            return False
+        self.record(step, STARTED, f"ran '{setup.run}' in a terminal window in {self.s.clock() - started:.1f}s")
+        return True
+
     # ------------------------------------------------------------- commands
 
     def run_commands(self, session: Session | None) -> None:
@@ -295,7 +484,10 @@ class StartRun(Run):
             except StepError as exc:
                 self.record(step, FAILED, str(exc))
 
-    def _run_command(self, step: str, command, session: Session | None) -> None:
+    def _run_command(self, step: str, command: Command, session: Session | None) -> None:
+        if self.setup_failed:
+            self.record(step, SKIPPED, "a setup command failed")
+            return
         if command.port is not None:
             state = self.ports.state(command.port)
             if state.owner == ports.PROJECT:
@@ -313,17 +505,19 @@ class StartRun(Run):
         cwd = self.project.path / command.cwd if command.cwd else self.project.path
         if session.kind == "herdr":
             self._run_in_herdr(step, command, session, cwd)
-        else:
+        elif session.kind == "tmux":
             self._run_in_tmux(step, command, session, cwd)
+        else:
+            self._run_in_terminal(step, command, cwd)
 
-    def _run_in_herdr(self, step: str, command, session: Session, cwd: Path) -> None:
+    def _run_in_herdr(self, step: str, command: Command, session: Session, cwd: Path) -> None:
         herdr = self.s.herdr
         label = tab_label(command.name)
         tab = None if session.created else herdr.find_tab(session.id, label)
 
         if tab is None:
             def create_and_run() -> None:
-                _, pane_id = herdr.create_tab(session.id, cwd, label)
+                _, pane_id = herdr.create_tab(session.id, cwd, label, env=command.env)
                 herdr.run(pane_id, command.run)
 
             self.act(step, f"create tab '{label}' and run '{command.run}'", create_and_run)
@@ -339,14 +533,14 @@ class StartRun(Run):
             return
         self.act(step, f"run '{command.run}' in tab '{label}'", lambda: herdr.run(pane.id, command.run))
 
-    def _run_in_tmux(self, step: str, command, session: Session, cwd: Path) -> None:
+    def _run_in_tmux(self, step: str, command: Command, session: Session, cwd: Path) -> None:
         tmux = self.s.tmux
         name = window_name(command.name)
         target = None if session.created else tmux.find_window(session.id, name)
 
         if target is None:
             def create_and_run() -> None:
-                tmux.run(tmux.new_window(session.id, name, cwd), command.run)
+                tmux.run(tmux.new_window(session.id, name, cwd, env=command.env), command.run)
 
             self.act(step, f"create window '{name}' and run '{command.run}'", create_and_run)
             return
@@ -356,6 +550,18 @@ class StartRun(Run):
             return
         self.act(step, f"run '{command.run}' in window '{name}'", lambda: tmux.run(target, command.run))
 
+    def _run_in_terminal(self, step: str, command: Command, cwd: Path) -> None:
+        """"none" mode: the process gets a terminal window with a known class."""
+        window = self.process_window(command.name)
+        if window is not None:
+            self.record(step, SKIPPED, f"its terminal window is open ({window.label})")
+            return
+        cls = self.process_window_class(command.name)
+        argv = ["omarchy-launch-tui", f"--app-id={cls}", *(["env", *command.env] if command.env else []), "bash", "-lc", shell_line(cwd, command.run)]
+        self.launch_placed(step, f"open a terminal window running '{command.run}'", argv,
+                           workspace=self.project.workspaces.terminal,
+                           appears=lambda w: w.cls == cls or w.initial_class == cls, cwd=cwd)
+
     # ------------------------------------------------------------- terminal
 
     def attach_terminal(self, session: Session | None) -> None:
@@ -363,25 +569,62 @@ class StartRun(Run):
         if session is None:
             self.record(step, SKIPPED, "no workspace to attach to")
             return
+        if session.kind == "none":
+            self.record(step, SKIPPED, "no multiplexer to attach to")
+            return
         try:
-            if session.kind == "herdr":
-                pids = herdr_client_pids(self.s.processes())
-            else:
-                pids = self.s.tmux.client_pids(session.id)
-            window = None
-            for pid in pids:
-                window = hypr.window_for_pid(self.windows(), pid, proc_root=self.s.proc_root)
-                if window is not None:
-                    break
+            window = self._terminal_window(session)
             if window is not None:
                 self.focus(step, window, "terminal")
             else:
-                argv = herdr_attach_argv() if session.kind == "herdr" else tmux_attach_argv(session.id)
-                self.act(step, f"open a terminal attached to {session.kind}", lambda: self.s.runner.detach(argv))
+                self._open_terminal(step, session)
             if session.kind == "herdr" and not session.created:
                 self.act("terminal:focus", f"show workspace {session.id} in herdr", lambda: self.s.herdr.focus_workspace(session.id), status=FOCUSED)
         except StepError as exc:
             self.record(step, FAILED, str(exc))
+
+    def _terminal_window(self, session: Session) -> hypr.Window | None:
+        if session.kind == "herdr":
+            pids = herdr_client_pids(self.s.processes())
+        else:
+            pids = self.s.tmux.client_pids(session.id)
+        for pid in pids:
+            window = hypr.window_for_pid(self.windows(), pid, proc_root=self.s.proc_root)
+            if window is not None:
+                return window
+        return None
+
+    def _open_terminal(self, step: str, session: Session) -> None:
+        argv = herdr_attach_argv() if session.kind == "herdr" else tmux_attach_argv(session.id)
+        detail = f"open a terminal attached to {session.kind}"
+        workspace = self.project.workspaces.terminal
+        if workspace is None:
+            self.act(step, detail, lambda: self.s.runner.detach(argv))
+            return
+        if self.dry_run:
+            self.record(step, PLANNED, f"{detail}, on workspace {workspace}")
+            return
+        # The new terminal is found through the multiplexer client it runs,
+        # the same way an existing one is, rather than by guessing its class.
+        found: dict[str, hypr.Window | None] = {"window": None}
+
+        def appeared() -> bool:
+            self.refresh_windows()
+            found["window"] = self._terminal_window(session)
+            return found["window"] is not None
+
+        try:
+            self.s.runner.detach(argv)
+            self.wait_until(appeared, PLACE_TIMEOUT)
+            if found["window"] is not None:
+                hypr.move_to_workspace(self.s.runner, found["window"], workspace)
+        except StepError as exc:
+            self.record(step, FAILED, f"{detail}: {exc}")
+            return
+        if found["window"] is None:
+            self.record(step, STARTED, f"{detail}; it did not attach within {PLACE_TIMEOUT:g}s, so it was not moved to workspace {workspace}")
+        else:
+            self.record(step, STARTED, f"{detail}, moved to workspace {workspace}")
 
     # ------------------------------------------------------------------ url
 
@@ -395,7 +638,10 @@ class StartRun(Run):
         step = "wait"
         url = self.project.url
         if url is None:
-            self.record(step, SKIPPED, "no url configured")
+            self.record(step, SKIPPED, "no page configured")
+            return False, False
+        if self.setup_failed:
+            self.record(step, SKIPPED, "a setup command failed")
             return False, False
         host = urlsplit(url).hostname or LOCAL_HOST
         port = url_port(url)
@@ -427,12 +673,16 @@ class StartRun(Run):
         step = "browser"
         url = self.project.url
         if url is None:
-            self.record(step, SKIPPED, "no url configured")
+            self.record(step, SKIPPED, "no page configured")
             return
         if self.url_blocked:
-            self.record(step, SKIPPED, "url belongs to another project (see the wait step)")
+            self.record(step, SKIPPED, "page belongs to another project (see the wait step)")
+            return
+        if self.setup_failed:
+            self.record(step, SKIPPED, "a setup command failed")
             return
         mode = self.config.browser_for(self.project)
+        workspace = self.project.workspaces.browser
         try:
             if mode == "webapp":
                 window = self.webapp_window()
@@ -440,17 +690,22 @@ class StartRun(Run):
                     self.focus(step, window, "web app window")
                     return
                 if not reachable and not self.dry_run:
-                    self.record(step, SKIPPED, "url not available (see the wait step), not opening a web app window")
+                    self.record(step, SKIPPED, "page not available (see the wait step), not opening a web app window")
                     return
-                self.act(step, f"open {url} as a web app window", lambda: self.s.runner.detach(["omarchy-launch-webapp", url]))
+                pattern = self.webapp_pattern()
+                self.launch_placed(step, f"open {url} as a web app window", ["omarchy-launch-webapp", url],
+                                   workspace=workspace, appears=lambda w: hypr.class_matches(w, pattern))
                 return
             if was_up:
                 self.record(step, SKIPPED, "server was already up; an open tab cannot be detected, so none was opened")
                 return
             if not reachable and not self.dry_run:
-                self.record(step, SKIPPED, "url not available (see the wait step), not opening a browser tab")
+                self.record(step, SKIPPED, "page not available (see the wait step), not opening a browser tab")
                 return
-            self.act(step, f"open {url} in the browser", lambda: self.s.runner.detach(["xdg-open", url]))
+            # A tab lands in an existing browser window, which stays where it
+            # is; only a browser window that did not exist before is placed.
+            self.launch_placed(step, f"open {url} in the browser", ["xdg-open", url],
+                               workspace=workspace, appears=lambda w: hypr.class_matches(w, BROWSER_CLASSES))
         except StepError as exc:
             self.record(step, FAILED, str(exc))
 
@@ -465,7 +720,16 @@ class StartRun(Run):
             if window is not None:
                 self.focus(step, window, "editor")
                 return
-            self.act(step, f"open editor: {' '.join(argv)}", lambda: self.s.runner.detach(gui_argv(self.s.runner, argv), cwd=self.project.path))
+            detail = f"open editor: {' '.join(argv)}"
+            launch = gui_argv(self.s.runner, argv)
+            workspace = self.project.workspaces.editor
+            if editor.share_window or editor.match is None:
+                # A shared window already has a place; without a class match
+                # the new window cannot be told apart, so it is not moved.
+                self.act(step, detail, lambda: self.s.runner.detach(launch, cwd=self.project.path))
+                return
+            appears = self.editor_predicate(fill(editor.match, self.project), self.project.path.name)
+            self.launch_placed(step, detail, launch, workspace=workspace, appears=appears, cwd=self.project.path)
         except StepError as exc:
             self.record(step, FAILED, str(exc))
 
@@ -473,12 +737,14 @@ class StartRun(Run):
         for app in self.project.apps:
             step = f"app:{app.name}"
             argv = [fill(part, self.project) for part in app.launch]
+            pattern = fill(app.match, self.project)
             try:
                 window = self.app_window(app)
                 if window is not None:
                     self.focus(step, window, app.name)
                     continue
-                self.act(step, f"open {app.name}: {' '.join(argv)}", lambda: self.s.runner.detach(gui_argv(self.s.runner, argv), cwd=self.project.path))
+                self.launch_placed(step, f"open {app.name}: {' '.join(argv)}", gui_argv(self.s.runner, argv),
+                                   workspace=app.workspace, appears=lambda w, p=pattern: hypr.matches(w, p), cwd=self.project.path)
             except StepError as exc:
                 self.record(step, FAILED, str(exc))
 
@@ -502,15 +768,18 @@ class StopRun(Run):
             try:
                 if session.kind == "herdr":
                     self._stop_in_herdr(step, command, session)
-                else:
+                elif session.kind == "tmux":
                     self._stop_in_tmux(step, command, session)
+                else:
+                    self._stop_in_terminal(step, command)
             except StepError as exc:
                 self.record(step, FAILED, str(exc))
+        self.close_setup_tab(session)
 
     def _port_closed(self, port: int | None) -> bool:
         return port is None or not self.s.probe(LOCAL_HOST, port)
 
-    def _stop_in_herdr(self, step: str, command, session: Session) -> None:
+    def _stop_in_herdr(self, step: str, command: Command, session: Session) -> None:
         herdr = self.s.herdr
         label = tab_label(command.name)
         tab = herdr.find_tab(session.id, label)
@@ -537,7 +806,7 @@ class StopRun(Run):
         waiting = f", wait for port {command.port} to close" if command.port is not None else ""
         self.act(step, f"interrupt {foreground.summary}{waiting}, close tab '{label}'", interrupt_and_close, status=STOPPED)
 
-    def _stop_in_tmux(self, step: str, command, session: Session) -> None:
+    def _stop_in_tmux(self, step: str, command: Command, session: Session) -> None:
         tmux = self.s.tmux
         name = window_name(command.name)
         target = tmux.find_window(session.id, name)
@@ -559,6 +828,50 @@ class StopRun(Run):
 
         waiting = f", wait for port {command.port} to close" if command.port is not None else ""
         self.act(step, f"interrupt {running}{waiting}, close window '{name}'", interrupt_and_close, status=STOPPED)
+
+    def _stop_in_terminal(self, step: str, command: Command) -> None:
+        """"none" mode: closing the terminal window hangs up the process."""
+        window = self.process_window(command.name)
+        if window is None:
+            self.record(step, SKIPPED, "no terminal window for it")
+            return
+        timeout = self.project.wait_timeout
+
+        def close_and_wait() -> None:
+            hypr.close(self.s.runner, window)
+            if not self.wait_until(lambda: self._port_closed(command.port), timeout):
+                raise StepFailure(f"port {command.port} still open after {timeout}s")
+
+        waiting = f" and wait for port {command.port} to close" if command.port is not None else ""
+        self.act(step, f"close its terminal window{waiting}", close_and_wait, status=STOPPED)
+
+    def close_setup_tab(self, session: Session | None) -> None:
+        """The setup tab is omadev's; close it when it is idle."""
+        if session is None or session.kind == "none" or not self.project.setup:
+            return
+        step = "setup"
+        try:
+            if session.kind == "herdr":
+                herdr = self.s.herdr
+                tab = herdr.find_tab(session.id, tab_label(SETUP_TAB))
+                if tab is None:
+                    return
+                pane = herdr.first_pane(session.id, tab.id)
+                if pane is not None and not herdr.foreground(pane.id).idle:
+                    self.record(step, SKIPPED, "setup tab is busy; left open")
+                    return
+                self.act(step, "close the setup tab", lambda: herdr.close_tab(tab.id), status=STOPPED)
+            else:
+                tmux = self.s.tmux
+                target = tmux.find_window(session.id, window_name(SETUP_TAB))
+                if target is None:
+                    return
+                if not tmux.idle(target):
+                    self.record(step, SKIPPED, "setup window is busy; left open")
+                    return
+                self.act(step, "close the setup window", lambda: tmux.kill_window(target), status=STOPPED)
+        except StepError as exc:
+            self.record(step, FAILED, str(exc))
 
     # -------------------------------------------------------- stop_commands
 
@@ -620,7 +933,7 @@ class StopRun(Run):
     def close_browser(self) -> None:
         step = "browser"
         if self.project.url is None:
-            self.record(step, SKIPPED, "no url configured")
+            self.record(step, SKIPPED, "no page configured")
             return
         if self.config.browser_for(self.project) != "webapp":
             self.record(step, SKIPPED, "browser tab left open; a tab cannot be told from the others")
@@ -646,6 +959,8 @@ def stop(project: Project, config: Config, services: Services, *, dry_run: bool 
     else:
         if session is None:
             run.record("workspace", SKIPPED, f"no {project.multiplexer} workspace '{project.session_name}'")
+        elif session.kind == "none":
+            run.record("workspace", SKIPPED, "no multiplexer; processes run in their own terminal windows")
         else:
             run.record("workspace", SKIPPED, f"{project.multiplexer} workspace '{project.session_name}' left in place ({session.id})")
     run.stop_commands(session)
@@ -659,6 +974,7 @@ def stop(project: Project, config: Config, services: Services, *, dry_run: bool 
 def start(project: Project, config: Config, services: Services, *, dry_run: bool = False) -> list[StepResult]:
     run = StartRun(project, config, services, dry_run=dry_run)
     session = run.ensure_multiplexer()
+    run.run_setup(session)
     run.run_commands(session)
     run.attach_terminal(session)
     if project.mode == "parallel":
@@ -685,8 +1001,11 @@ def status(project: Project, config: Config, services: Services) -> dict:
         "browser": config.browser_for(project),
     }
 
+    lookup = Run(project, config, services, dry_run=True)
     try:
-        if project.multiplexer == "herdr":
+        if project.multiplexer == "none":
+            snapshot["workspace"] = {"present": None, "id": None}
+        elif project.multiplexer == "herdr":
             workspace = services.herdr.find_workspace(project.session_name) if services.herdr.available() and services.herdr.server_running() else None
             snapshot["workspace"] = {"present": workspace is not None, "id": workspace.id if workspace else None}
         else:
@@ -696,12 +1015,20 @@ def status(project: Project, config: Config, services: Services) -> dict:
     except StepError as exc:
         snapshot["workspace"] = {"present": False, "id": None, "error": str(exc)}
 
+    try:
+        lookup.windows()
+    except StepError as exc:
+        snapshot["windows_error"] = str(exc)
+        lookup._windows = []
+
     inspector = PortInspector(project, services)
     snapshot["commands"] = []
     for command in project.commands:
         entry: dict = {"name": command.name, "port": command.port, "listening": None, "owner": None, "detail": None}
         if command.port is not None:
             entry.update(inspector.state(command.port).to_dict())
+        elif project.multiplexer == "none":
+            entry["listening"] = lookup.process_window(command.name) is not None
         snapshot["commands"].append(entry)
     if project.url is not None:
         host = urlsplit(project.url).hostname or LOCAL_HOST
@@ -715,12 +1042,6 @@ def status(project: Project, config: Config, services: Services) -> dict:
     else:
         snapshot["url"] = None
 
-    lookup = Run(project, config, services, dry_run=True)
-    try:
-        lookup.windows()
-    except StepError as exc:
-        snapshot["windows_error"] = str(exc)
-        lookup._windows = []
     snapshot["editor_open"] = None if project.effective_editor.match is None else lookup.editor_window() is not None
     snapshot["apps"] = [{"name": a.name, "open": lookup.app_window(a) is not None} for a in project.apps]
     return snapshot

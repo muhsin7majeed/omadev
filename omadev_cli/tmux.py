@@ -83,11 +83,13 @@ class Tmux:
                 return target
         return None
 
-    def new_window(self, session: str, name: str, cwd: Path) -> str:
-        result = self._run(
-            "new-window", "-d", "-t", f"={session}:", "-n", name, "-c", str(cwd),
-            "-P", "-F", "#{session_name}:#{window_index}",
-        )
+    def new_window(self, session: str, name: str, cwd: Path, env: tuple[str, ...] = ()) -> str:
+        """Create a detached window and return its target. `env` entries are
+        KEY=VALUE for the new window's shell (tmux 3.2+ `-e`)."""
+        args = ["new-window", "-d", "-t", f"={session}:", "-n", name, "-c", str(cwd)]
+        for entry in env:
+            args += ["-e", entry]
+        result = self._run(*args, "-P", "-F", "#{session_name}:#{window_index}")
         target = result.stdout.strip()
         if not target:
             raise TmuxError("tmux new-window did not report the new window")

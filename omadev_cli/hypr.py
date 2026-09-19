@@ -120,6 +120,24 @@ def close(runner: Runner, window: Window) -> None:
     _dispatch(runner, f'hl.dsp.window.close({{ window = "{address}" }})', ["closewindow", address], f"close {window.label}")
 
 
+def move_to_workspace(runner: Runner, window: Window, workspace: int) -> None:
+    """Move a window to a workspace without switching to it."""
+    address = f"address:{window.address}"
+    _dispatch(
+        runner,
+        f'hl.dsp.window.move({{ window = "{address}", workspace = {int(workspace)}, silent = true }})',
+        ["movetoworkspacesilent", f"{int(workspace)},{address}"],
+        f"move {window.label} to workspace {workspace}",
+    )
+
+
+def app_id(*parts: str) -> str:
+    """A window class for a terminal window omadev opens itself, so it can be
+    found again: `omadev.<project>.<name>`, lower-case, safe characters only."""
+    safe = [re.sub(r"[^a-z0-9_-]+", "-", part.lower()).strip("-") or "x" for part in parts]
+    return "omadev." + ".".join(safe)
+
+
 def window_for_pid(windows: Iterable[Window], pid: int, *, proc_root: Path = Path("/proc"), max_depth: int = 16) -> Window | None:
     """The window owned by `pid` or by one of its ancestors.
 

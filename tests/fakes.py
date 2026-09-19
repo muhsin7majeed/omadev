@@ -28,6 +28,9 @@ class FakeRunner:
         self.calls: list[tuple[str, ...]] = []
         self.detached: list[tuple[str, ...]] = []
         self._responders: list[Responder] = []
+        # Called with the argv of every detached launch, so a test can make
+        # a window appear in response, the way a real launch would.
+        self.detach_hooks: list[Callable[[tuple[str, ...]], None]] = []
 
     def on(self, *prefix: str, stdout: str = "", returncode: int = 0, stderr: str = "") -> "FakeRunner":
         def respond(argv: tuple[str, ...]) -> CommandResult | None:
@@ -63,6 +66,8 @@ class FakeRunner:
         if args[0] not in self.tools and not args[0].startswith("omarchy-") and args[0] != "xdg-open":
             raise ToolMissing(args[0])
         self.detached.append(args)
+        for hook in list(self.detach_hooks):
+            hook(args)
 
     def has(self, tool: str) -> bool:
         return tool in self.tools
@@ -72,7 +77,7 @@ class FakeRunner:
         read_only = {("hyprctl", "clients"), ("herdr", "workspace", "list"), ("herdr", "tab", "list"),
                      ("herdr", "pane", "list"), ("herdr", "pane", "process-info"), ("tmux", "has-session"),
                      ("tmux", "list-windows"), ("tmux", "list-clients"), ("tmux", "display-message"),
-                     ("ss",), ("docker", "ps")}
+                     ("ss",), ("docker", "ps"), ("hyprctl", "clients")}
         return [c for c in self.calls if not any(c[: len(prefix)] == prefix for prefix in read_only)]
 
 

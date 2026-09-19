@@ -313,7 +313,7 @@ Panel {
 
   function summary(project) {
     var parts = []
-    if (project.workspace && project.workspace.present) parts.push((String(project.multiplexer || "") + " " + String(project.workspace.id || "")).trim())
+    if (project.multiplexer !== "none" && project.workspace && project.workspace.present) parts.push((String(project.multiplexer || "") + " " + String(project.workspace.id || "")).trim())
     if (project.url) {
       if (project.url.reachable) parts.push("url responding")
       else if (project.url.listening) parts.push("port open, no answer yet")

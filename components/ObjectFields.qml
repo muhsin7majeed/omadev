@@ -11,6 +11,7 @@ Column {
 
   property var spec: ({})
   property var value: null
+  property bool showHelp: false
   property color foreground: Color.popups.text
   property color muted: Qt.alpha(foreground, 0.6)
   property string fontFamily: Style.font.family
@@ -82,6 +83,7 @@ Column {
         required property var modelData
         spec: modelData
         compact: true
+        showHelp: group.showHelp
         value: group.hasValue ? group.value[modelData.key] : null
         foreground: group.foreground
         muted: group.muted

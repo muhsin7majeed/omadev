@@ -15,6 +15,8 @@ Column {
   property bool busy: false
   property string errorText: ""
   property string errorKey: ""
+  // Off: each field has a "?" tooltip. On: every description is inline.
+  property bool showHelp: false
   property real maxFieldsHeight: Style.space(480)
   property color foreground: Color.popups.text
   property color muted: Qt.alpha(foreground, 0.6)
@@ -66,6 +68,18 @@ Column {
       foreground: form.foreground
       fontFamily: form.fontFamily
     }
+
+    PanelActionButton {
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      // U+F0625, nf-md-help-circle-outline.
+      iconText: "󰘥"
+      tooltipText: form.showHelp ? "Hide field descriptions" : "Show all field descriptions"
+      foreground: form.showHelp ? Color.accent : form.muted
+      hoverColor: Color.accent
+      fontFamily: form.fontFamily
+      onClicked: form.showHelp = !form.showHelp
+    }
   }
 
   Text {
@@ -111,6 +125,7 @@ Column {
             item.value = Qt.binding(function() { return form.draft[slot.key] })
             item.changed.connect(function(next) { form.set(slot.key, next) })
             if ("invalid" in item) item.invalid = Qt.binding(function() { return form.errorKey === slot.key })
+            if ("showHelp" in item) item.showHelp = Qt.binding(function() { return form.showHelp })
           }
         }
       }
@@ -132,41 +147,30 @@ Column {
     id: objectField
 
     Column {
+      id: objectGroup
       property var spec: ({})
       property var value: null
       property bool invalid: false
+      property bool showHelp: false
       signal changed(var value)
 
       width: parent ? parent.width : implicitWidth
       spacing: Style.spacing.xs
 
-      Text {
-        textFormat: Text.PlainText
-        text: String(parent.spec.label || "")
-        color: parent.invalid ? Color.urgent : form.foreground
-        font.family: form.fontFamily
-        font.pixelSize: Style.font.bodySmall
-        font.bold: true
-      }
-
-      Text {
-        visible: text !== ""
-        width: parent.width
-        wrapMode: Text.Wrap
-        textFormat: Text.PlainText
-        text: String(parent.spec.help || "")
-        color: form.muted
-        font.family: form.fontFamily
-        font.pixelSize: Style.font.caption
+      GroupLabel {
+        spec: objectGroup.spec
+        invalid: objectGroup.invalid
+        showHelp: objectGroup.showHelp
       }
 
       ObjectFields {
-        spec: parent.spec
-        value: parent.value
+        spec: objectGroup.spec
+        value: objectGroup.value
+        showHelp: objectGroup.showHelp
         foreground: form.foreground
         muted: form.muted
         fontFamily: form.fontFamily
-        onChanged: function(next) { parent.changed(next) }
+        onChanged: function(next) { objectGroup.changed(next) }
       }
     }
   }
@@ -175,42 +179,74 @@ Column {
     id: listField
 
     Column {
+      id: listGroup
       property var spec: ({})
       property var value: []
       property bool invalid: false
+      property bool showHelp: false
       signal changed(var value)
 
       width: parent ? parent.width : implicitWidth
       spacing: Style.spacing.xs
 
+      GroupLabel {
+        spec: listGroup.spec
+        invalid: listGroup.invalid
+        showHelp: listGroup.showHelp
+      }
+
+      ListField {
+        spec: listGroup.spec
+        value: listGroup.value
+        showHelp: listGroup.showHelp
+        foreground: form.foreground
+        muted: form.muted
+        fontFamily: form.fontFamily
+        onChanged: function(next) { listGroup.changed(next) }
+      }
+    }
+  }
+
+  // The heading of an object or list group: label, "?" hint, and the
+  // description inline when the form's toggle is on.
+  component GroupLabel: Column {
+    property var spec: ({})
+    property bool invalid: false
+    property bool showHelp: false
+
+    width: parent ? parent.width : implicitWidth
+    spacing: Style.spacing.xs
+
+    Row {
+      spacing: Style.spacing.sm
+
       Text {
         textFormat: Text.PlainText
-        text: String(parent.spec.label || "")
-        color: parent.invalid ? Color.urgent : form.foreground
+        text: String(parent.parent.spec.label || "")
+        color: parent.parent.invalid ? Color.urgent : form.foreground
         font.family: form.fontFamily
         font.pixelSize: Style.font.bodySmall
         font.bold: true
       }
 
-      Text {
-        visible: text !== ""
-        width: parent.width
-        wrapMode: Text.Wrap
-        textFormat: Text.PlainText
-        text: String(parent.spec.help || "")
-        color: form.muted
-        font.family: form.fontFamily
-        font.pixelSize: Style.font.caption
-      }
-
-      ListField {
-        spec: parent.spec
-        value: parent.value
+      HelpHint {
+        visible: text !== "" && !parent.parent.showHelp
+        anchors.verticalCenter: parent.verticalCenter
+        text: String(parent.parent.spec.help || "")
         foreground: form.foreground
-        muted: form.muted
         fontFamily: form.fontFamily
-        onChanged: function(next) { parent.changed(next) }
       }
+    }
+
+    Text {
+      visible: parent.showHelp && text !== ""
+      width: parent.width
+      wrapMode: Text.Wrap
+      textFormat: Text.PlainText
+      text: String(parent.spec.help || "")
+      color: form.muted
+      font.family: form.fontFamily
+      font.pixelSize: Style.font.caption
     }
   }
 

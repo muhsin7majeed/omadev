@@ -14,6 +14,8 @@ Column {
   property var value: null
   property bool compact: false
   property bool invalid: false
+  // Help is a "?" tooltip by default; the form's toggle shows it inline.
+  property bool showHelp: false
   property color foreground: Color.popups.text
   property color muted: Qt.alpha(foreground, 0.6)
   property string fontFamily: Style.font.family
@@ -23,6 +25,7 @@ Column {
   readonly property string kind: String(spec.kind || "string")
   readonly property string label: String(spec.label || spec.key || "")
   readonly property string help: String(spec.help || "")
+  readonly property string example: String(spec.example || "")
   readonly property bool optional: spec.optional === true
   readonly property string display: kind === "argv" ? argvText(value) : (value === null || value === undefined ? "" : String(value))
 
@@ -61,6 +64,14 @@ Column {
       font.family: field.fontFamily
       font.pixelSize: Style.font.caption
     }
+
+    HelpHint {
+      visible: field.help !== "" && !field.showHelp
+      anchors.verticalCenter: parent.verticalCenter
+      text: field.help
+      foreground: field.foreground
+      fontFamily: field.fontFamily
+    }
   }
 
   Loader {
@@ -69,7 +80,7 @@ Column {
   }
 
   Text {
-    visible: !field.compact && field.help !== ""
+    visible: field.showHelp && field.help !== ""
     width: parent.width
     wrapMode: Text.Wrap
     textFormat: Text.PlainText
@@ -85,7 +96,8 @@ Column {
     TextField {
       width: field.width
       text: field.display
-      placeholderText: field.kind === "argv" ? "command and arguments" : ""
+      // The example sits in the empty field as a hint of the expected shape.
+      placeholderText: field.example !== "" ? "e.g. " + field.example : ""
       font.family: field.fontFamily
       font.pixelSize: Style.font.body
       foreground: field.foreground

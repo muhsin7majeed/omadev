@@ -36,11 +36,16 @@ class SchemaParityTests(unittest.TestCase):
         self.assertEqual(by_key["wait_timeout"]["default"], cfg.DEFAULT_WAIT_TIMEOUT)
 
     def test_every_field_has_the_shape_the_form_needs(self) -> None:
+        text_kinds = {"string", "path", "url", "regex", "argv", "integer"}
+
         def check(fields: list[dict], where: str) -> None:
             for field in fields:
                 here = f"{where}.{field['key']}"
                 self.assertIn("kind", field, here)
                 self.assertIn("label", field, here)
+                self.assertTrue(field.get("help", "").strip(), f"{here} needs help text")
+                if field["kind"] in text_kinds:
+                    self.assertTrue(field.get("example", "").strip(), f"{here} needs an example")
                 if field["kind"] == "enum":
                     self.assertTrue(field["options"], here)
                 if field["kind"] == "integer":

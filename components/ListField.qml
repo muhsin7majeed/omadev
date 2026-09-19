@@ -11,6 +11,7 @@ Column {
 
   property var spec: ({})
   property var value: []
+  property bool showHelp: false
   property color foreground: Color.popups.text
   property color muted: Qt.alpha(foreground, 0.6)
   property string fontFamily: Style.font.family
@@ -131,8 +132,11 @@ Column {
     id: scalarRow
 
     ScalarField {
-      spec: ({ key: "value", kind: String(list.item.kind || "string"), label: "" })
+      // A scalar row inherits the list's example; its label and help are
+      // already shown once above the rows.
+      spec: ({ key: "value", kind: String(list.item.kind || "string"), label: "", example: list.spec.example || "" })
       compact: true
+      showHelp: list.showHelp
       value: list.items[rowIndex]
       foreground: list.foreground
       muted: list.muted
@@ -156,6 +160,7 @@ Column {
           required property var modelData
           spec: modelData
           compact: true
+          showHelp: list.showHelp
           value: list.items[fieldsColumn.at] ? list.items[fieldsColumn.at][modelData.key] : null
           foreground: list.foreground
           muted: list.muted

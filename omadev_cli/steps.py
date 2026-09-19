@@ -1071,6 +1071,31 @@ def succeeded(results: list[StepResult]) -> bool:
     return all(result.status != FAILED for result in results)
 
 
+def _process_state(lookup: Run, session: Session | None, command: Command) -> dict:
+    """Is the process's tab (or terminal window) there, and is it busy?
+
+    This is what makes a process without a port, such as a watcher, show
+    as running, and what lets the widget offer Stop for it.
+    """
+    if session is None:
+        return {"tab": False, "running": False}
+    if session.kind == "none":
+        present = lookup.process_window(command.name) is not None
+        return {"tab": present, "running": present}
+    if session.kind == "herdr":
+        herdr = lookup.s.herdr
+        tab = herdr.find_tab(session.id, tab_label(command.name))
+        if tab is None:
+            return {"tab": False, "running": False}
+        pane = herdr.first_pane(session.id, tab.id)
+        return {"tab": True, "running": pane is not None and not herdr.foreground(pane.id).idle}
+    tmux = lookup.s.tmux
+    target = tmux.find_window(session.id, window_name(command.name))
+    if target is None:
+        return {"tab": False, "running": False}
+    return {"tab": True, "running": not tmux.idle(target)}
+
+
 def status(project: Project, config: Config, services: Services) -> dict:
     """A read-only snapshot: what of this project is up right now."""
     snapshot: dict = {
@@ -1099,15 +1124,24 @@ def status(project: Project, config: Config, services: Services) -> dict:
         snapshot["windows_error"] = str(exc)
         lookup._windows = []
 
+    # Where the processes live, to tell a running tab from an idle one.
+    try:
+        session = lookup.find_session()
+    except StepError:
+        session = None
+
     inspector = PortInspector(project, services)
     snapshot["commands"] = []
     for command in project.commands:
         port = project.command_port(command)
-        entry: dict = {"name": command.name, "port": port, "listening": None, "owner": None, "detail": None}
+        entry: dict = {"name": command.name, "run": command.run, "port": port, "listening": None,
+                       "owner": None, "detail": None, "tab": None, "running": None}
         if port is not None:
             entry.update(inspector.state(port).to_dict())
-        elif project.multiplexer == "none":
-            entry["listening"] = lookup.process_window(command.name) is not None
+        try:
+            entry.update(_process_state(lookup, session, command))
+        except StepError as exc:
+            entry["error"] = str(exc)
         snapshot["commands"].append(entry)
     if project.url is not None:
         host = urlsplit(project.url).hostname or LOCAL_HOST

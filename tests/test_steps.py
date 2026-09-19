@@ -497,6 +497,9 @@ class StatusTests(unittest.TestCase):
     def test_status_snapshot(self) -> None:
         fake = FakeServices()
         fake.runner.on_json("herdr", "workspace", "list", result=WORKSPACES)
+        fake.runner.on_json("herdr", "tab", "list", result=TABS)
+        fake.runner.on_json("herdr", "pane", "list", result=PANES)
+        fake.runner.on_json("herdr", "pane", "process-info", result=BUSY)
         fake.open_ports = {3000}
         fake.windows = [window(cls="dev.zed.Zed", title="kadha — x")]
         with tempfile.TemporaryDirectory() as tmp:
@@ -509,10 +512,25 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(snapshot["browser"], "browser")
         command = snapshot["commands"][0]
         self.assertEqual((command["name"], command["port"], command["listening"], command["owner"]), ("app", 3000, True, "project"))
+        self.assertEqual((command["tab"], command["running"], command["run"]), (True, True, "docker compose up"))
         self.assertTrue(snapshot["url"]["reachable"])
         self.assertEqual(snapshot["url"]["owner"], "project")
         self.assertTrue(snapshot["editor_open"])
         self.assertEqual(snapshot["apps"], [{"name": "lazydocker", "open": False}])
+        self.assertEqual(fake.runner.mutating_calls(), [])
+
+    def test_status_of_a_portless_watcher_comes_from_its_tab(self) -> None:
+        fake = FakeServices()
+        fake.runner.on_json("herdr", "workspace", "list", result=WORKSPACES)
+        fake.runner.on_json("herdr", "tab", "list", result={"tabs": [{"tab_id": "w5:t7", "label": "omadev-watch", "workspace_id": "w5"}]})
+        fake.runner.on_json("herdr", "pane", "list", result={"panes": [{"pane_id": "w5:p9", "tab_id": "w5:t7", "workspace_id": "w5"}]})
+        fake.runner.on_json("herdr", "pane", "process-info", result=IDLE)
+        with tempfile.TemporaryDirectory() as tmp:
+            config = kadha(Path(tmp), commands=[{"name": "watch", "run": "cargo watch"}, {"name": "other", "run": "x"}], url=None)
+            snapshot = steps.status(config.projects[0], config, fake.build())
+        watch, other = snapshot["commands"]
+        self.assertEqual((watch["port"], watch["tab"], watch["running"]), (None, True, False))
+        self.assertEqual((other["tab"], other["running"]), (False, False))
         self.assertEqual(fake.runner.mutating_calls(), [])
 
 

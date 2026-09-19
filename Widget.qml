@@ -4,6 +4,8 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
+import "components"
+
 // omadev: the bar face of a project launcher.
 //
 // This file only renders. Everything that decides or acts lives in bin/omadev,
@@ -11,6 +13,11 @@ import qs.Ui
 // per call. The widget owns no timers: status is fetched when the popup opens,
 // after a Start or Stop finishes, and when the projects file changes on disk.
 // While the popup is closed nothing here runs.
+//
+// The add/edit form is rendered from `omadev schema --json`, so a new project
+// field is added in the CLI and the form follows. The form hands its draft to
+// `omadev add` or `omadev edit`, which normalise and validate it exactly as
+// they validate the projects file.
 //
 // Colors, fonts and spacing come from the shell's Color and Style singletons
 // and from the bar that hosts the widget, so every Omarchy theme applies.
@@ -42,20 +49,37 @@ Panel {
 
   // ------------------------------------------------------------------ state
   //
+  // view: "list" or "form".
   // phase: "idle" before the first open, then "loading", "error", "empty" or
-  // "list". The popup shows exactly one of the last four.
+  // "list". The list view shows exactly one of the last four.
+  property string view: "list"
   property string phase: "idle"
   property var projects: []
   property string errorText: ""
   property bool gotStatusOutput: false
 
-  // One action at a time. `busyProject`/`busyAction` name it while it runs;
-  // `actionResults` keeps the last step list per project until the popup
-  // closes, so what happened stays readable after the spinner is gone.
+  // One Start/Stop at a time. `busyProject`/`busyAction` name it while it
+  // runs; `actionResults` keeps the last step list per project until the
+  // popup closes, so what happened stays readable after the spinner is gone.
   property string busyProject: ""
   property string busyAction: ""
   property var actionResults: ({})
   property bool gotActionOutput: false
+
+  // The form. `schemaFields` is fetched once per popup session. `formEditing`
+  // is the original name of the project being edited, or "" for a new one.
+  // The form owns its draft (assigned, never bound, so its own edits stick).
+  property var schemaFields: []
+  property string formEditing: ""
+  property string formError: ""
+  property string formErrorKey: ""
+  property bool formBusy: false
+  property string pendingOpen: ""          // "" | "new" | project name, while schema/show load
+  property string confirmRemove: ""         // project name awaiting confirmation
+
+  readonly property bool anyBusy: busyProject !== "" || formBusy || confirmRemove !== ""
+
+  // ------------------------------------------------------------- status
 
   function reload() {
     if (statusProc.running) return
@@ -81,19 +105,27 @@ Panel {
     return data
   }
 
+  function cliFailure(data, exitCode, stderrText) {
+    if (data && data.error) return String(data.error)
+    var detail = String(stderrText || "").trim()
+    return detail !== "" ? detail : "The omadev CLI exited with code " + exitCode + " and printed nothing."
+  }
+
   function applyStatus(text) {
     gotStatusOutput = true
     var data = parseCli(text)
     if (data.ok !== true) {
-      fail(data.error ? String(data.error) : "The omadev CLI reported a failure.")
+      fail(cliFailure(data, 1, ""))
       return
     }
     projects = Array.isArray(data.projects) ? data.projects : []
     phase = projects.length === 0 ? "empty" : "list"
   }
 
+  // ------------------------------------------------------------- actions
+
   function runAction(action, name) {
-    if (busyProject !== "" || actionProc.running) return
+    if (anyBusy || actionProc.running) return
     busyProject = name
     busyAction = action
     gotActionOutput = false
@@ -131,6 +163,132 @@ Panel {
     return Array.isArray(list) ? list : []
   }
 
+  // ---------------------------------------------------------------- form
+
+  function emptyDraft() {
+    var draft = {}
+    for (var i = 0; i < schemaFields.length; i++) {
+      var field = schemaFields[i]
+      if (field["default"] !== undefined) draft[field.key] = field["default"]
+      else if (field.kind === "list") draft[field.key] = []
+      else if (field.kind === "object") draft[field.key] = null
+      else draft[field.key] = ""
+    }
+    return draft
+  }
+
+  // Open the form for a new project ("new") or to edit `name`. The schema is
+  // fetched on first use; the project's full configuration comes from
+  // `omadev show`, since the status list carries only a summary.
+  function openForm(target) {
+    if (anyBusy || pendingOpen !== "") return
+    pendingOpen = target
+    formError = ""
+    formErrorKey = ""
+    if (schemaFields.length === 0) {
+      schemaProc.running = true
+      return
+    }
+    continueOpen()
+  }
+
+  function continueOpen() {
+    if (pendingOpen === "") return
+    if (pendingOpen === "new") {
+      formEditing = ""
+      form.draft = emptyDraft()
+      pendingOpen = ""
+      view = "form"
+      return
+    }
+    showProc.command = ["python3", root.cliPath, "show", pendingOpen, "--json"]
+    showProc.running = true
+  }
+
+  function applySchema(text) {
+    var data = parseCli(text)
+    if (data.ok !== true || !Array.isArray(data.fields)) {
+      pendingOpen = ""
+      fail(cliFailure(data, 1, ""))
+      return
+    }
+    schemaFields = data.fields
+    continueOpen()
+  }
+
+  function applyShow(text) {
+    var data = parseCli(text)
+    var name = pendingOpen
+    pendingOpen = ""
+    if (data.ok !== true || !data.project) {
+      fail(cliFailure(data, 1, ""))
+      return
+    }
+    var draft = emptyDraft()
+    for (var key in data.project) draft[key] = data.project[key]
+    formEditing = name
+    form.draft = draft
+    view = "form"
+  }
+
+  function closeForm() {
+    view = "list"
+    formBusy = false
+    formError = ""
+    formErrorKey = ""
+    pendingOpen = ""
+  }
+
+  function saveForm(draft) {
+    if (formBusy || saveProc.running) return
+    formBusy = true
+    formError = ""
+    formErrorKey = ""
+    var payload = JSON.stringify(draft)
+    saveProc.command = formEditing === ""
+      ? ["python3", root.cliPath, "add", payload, "--json"]
+      : ["python3", root.cliPath, "edit", formEditing, payload, "--json"]
+    saveProc.running = true
+  }
+
+  // "project 'demo'.commands[0].port" -> "commands", so the form can mark
+  // the field the CLI complained about.
+  function fieldKeyFromWhere(where) {
+    var text = String(where || "").replace(/^project(\s+'[^']*')?\.?/, "")
+    var match = text.match(/^[A-Za-z_]+/)
+    return match ? match[0] : ""
+  }
+
+  function applySave(text) {
+    formBusy = false
+    var data = parseCli(text)
+    if (data.ok !== true) {
+      formError = cliFailure(data, 1, "")
+      formErrorKey = fieldKeyFromWhere(data.where)
+      return
+    }
+    closeForm()
+    reload()
+  }
+
+  function removeProject(name) {
+    if (removeProc.running) return
+    removeProc.command = ["python3", root.cliPath, "remove", name, "--json"]
+    removeProc.running = true
+  }
+
+  function applyRemove(text) {
+    var data = parseCli(text)
+    confirmRemove = ""
+    if (data.ok !== true) {
+      if (view === "form") formError = cliFailure(data, 1, "")
+      else fail(cliFailure(data, 1, ""))
+      return
+    }
+    if (view === "form") closeForm()
+    reload()
+  }
+
   // ---------------------------------------------------------- derived text
 
   // Is anything of this project up? Ports held by another project do not
@@ -155,7 +313,7 @@ Panel {
 
   function summary(project) {
     var parts = []
-    if (project.workspace && project.workspace.present) parts.push(String(project.multiplexer || "") + " " + String(project.workspace.id || "")).trim()
+    if (project.workspace && project.workspace.present) parts.push((String(project.multiplexer || "") + " " + String(project.workspace.id || "")).trim())
     if (project.url) {
       if (project.url.reachable) parts.push("url responding")
       else if (project.url.listening) parts.push("port open, no answer yet")
@@ -191,8 +349,7 @@ Panel {
       // with a non-zero exit means it never got that far: python3 missing,
       // a traceback, a wrong path. stderr is the only explanation then.
       if (root.gotStatusOutput || exitCode === 0) return
-      var detail = String(statusErr.text || "").trim()
-      root.fail(detail !== "" ? detail : "The omadev CLI exited with code " + exitCode + " and printed nothing.")
+      root.fail(root.cliFailure(null, exitCode, statusErr.text))
     }
   }
 
@@ -206,13 +363,48 @@ Panel {
     }
     onExited: function(exitCode, exitStatus) {
       if (!root.gotActionOutput) {
-        var detail = String(actionErr.text || "").trim()
-        root.setResults(root.busyProject, [{
-          step: root.busyAction, status: "failed",
-          detail: detail !== "" ? detail : "The omadev CLI exited with code " + exitCode + " and printed nothing."
-        }])
+        root.setResults(root.busyProject, [{ step: root.busyAction, status: "failed", detail: root.cliFailure(null, exitCode, actionErr.text) }])
       }
       root.finishAction()
+    }
+  }
+
+  Process {
+    id: schemaProc
+    command: ["python3", root.cliPath, "schema", "--json"]
+    stdout: StdioCollector {
+      onStreamFinished: root.applySchema(text)
+    }
+  }
+
+  Process {
+    id: showProc
+    stdout: StdioCollector {
+      onStreamFinished: root.applyShow(text)
+    }
+  }
+
+  Process {
+    id: saveProc
+    stdout: StdioCollector {
+      onStreamFinished: root.applySave(text)
+    }
+    stderr: StdioCollector {
+      id: saveErr
+    }
+    onExited: function(exitCode, exitStatus) {
+      if (root.formBusy && exitCode !== 0) {
+        // No JSON came back: the CLI itself crashed.
+        root.formBusy = false
+        root.formError = root.cliFailure(null, exitCode, saveErr.text)
+      }
+    }
+  }
+
+  Process {
+    id: removeProc
+    stdout: StdioCollector {
+      onStreamFinished: root.applyRemove(text)
     }
   }
 
@@ -223,15 +415,30 @@ Panel {
     path: root.projectsPath
     watchChanges: true
     printErrors: false
-    onFileChanged: if (root.opened && root.busyProject === "") root.reload()
+    onFileChanged: if (root.opened && root.busyProject === "" && root.view === "list") root.reload()
   }
+
+  // One line per load, so `quickshell log -p $OMARCHY_PATH/shell` shows
+  // whether a hot reload actually picked the widget up.
+  Component.onCompleted: console.log("potato.omadev: widget loaded")
 
   onOpenedChanged: {
     if (opened) {
       reload()
     } else {
       actionResults = ({})
+      confirmRemove = ""
+      closeForm()
     }
+  }
+
+  // Development hooks: open the form from the terminal so it can be checked
+  // without clicking. `omarchy-shell potato.omadev.dev newProject`.
+  IpcHandler {
+    target: "potato.omadev.dev"
+
+    function newProject(): void { root.open(); root.openForm("new") }
+    function editProject(name: string): void { root.open(); root.openForm(name) }
   }
 
   // -------------------------------------------------------------------- bar
@@ -266,6 +473,9 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      // Text fields own the keyboard while the form is open; the dialog
+      // handles its own keys.
+      blocked: root.view === "form" || root.confirmRemove !== ""
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
@@ -275,9 +485,33 @@ Panel {
         anchors.right: parent.right
         spacing: Style.spacing.lg
 
-        Item {
+        // ----------------------------------------------------------- form
+
+        ProjectForm {
+          id: form
+          visible: root.view === "form"
           width: parent.width
-          height: Math.max(title.implicitHeight, refresh.height)
+          schema: root.schemaFields
+          title: root.formEditing === "" ? "New project" : "Edit " + root.formEditing
+          editing: root.formEditing !== ""
+          busy: root.formBusy
+          errorText: root.formError
+          errorKey: root.formErrorKey
+          maxFieldsHeight: Math.max(Style.space(200), popup.availableCardHeight - Style.space(200))
+          foreground: root.popupText
+          muted: root.popupMuted
+          fontFamily: root.fontFamily
+          onSaveRequested: function(project) { root.saveForm(project) }
+          onCancelRequested: root.closeForm()
+          onDeleteRequested: root.confirmRemove = root.formEditing
+        }
+
+        // ----------------------------------------------------------- list
+
+        Item {
+          visible: root.view === "list"
+          width: parent.width
+          height: Math.max(title.implicitHeight, headerActions.height)
 
           PanelSectionHeader {
             id: title
@@ -288,22 +522,38 @@ Panel {
             fontFamily: root.fontFamily
           }
 
-          PanelActionButton {
-            id: refresh
+          Row {
+            id: headerActions
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            // U+F0450, nf-md-refresh.
-            iconText: "󰑐"
-            tooltipText: "Check again"
-            enabled: root.phase !== "loading" && root.busyProject === ""
-            foreground: root.popupText
-            fontFamily: root.fontFamily
-            onClicked: root.reload()
+            spacing: Style.spacing.xs
+
+            PanelActionButton {
+              anchors.verticalCenter: parent.verticalCenter
+              // U+F0415, nf-md-plus.
+              iconText: "󰐕"
+              tooltipText: "Add a project"
+              enabled: !root.anyBusy && root.pendingOpen === ""
+              foreground: root.popupText
+              fontFamily: root.fontFamily
+              onClicked: root.openForm("new")
+            }
+
+            PanelActionButton {
+              anchors.verticalCenter: parent.verticalCenter
+              // U+F0450, nf-md-refresh.
+              iconText: "󰑐"
+              tooltipText: "Check again"
+              enabled: root.phase !== "loading" && !root.anyBusy
+              foreground: root.popupText
+              fontFamily: root.fontFamily
+              onClicked: root.reload()
+            }
           }
         }
 
         Text {
-          visible: root.phase === "loading" || root.phase === "idle"
+          visible: root.view === "list" && (root.phase === "loading" || root.phase === "idle")
           width: parent.width
           textFormat: Text.PlainText
           text: "Checking…"
@@ -313,7 +563,7 @@ Panel {
         }
 
         Column {
-          visible: root.phase === "error"
+          visible: root.view === "list" && root.phase === "error"
           width: parent.width
           spacing: Style.spacing.sm
 
@@ -339,7 +589,7 @@ Panel {
         }
 
         Column {
-          visible: root.phase === "empty"
+          visible: root.view === "list" && root.phase === "empty"
           width: parent.width
           spacing: Style.spacing.sm
 
@@ -357,7 +607,7 @@ Panel {
             width: parent.width
             wrapMode: Text.Wrap
             textFormat: Text.PlainText
-            text: "Projects live in " + root.projectsPath + ". Adding them from this panel comes next."
+            text: "Use + above to add one. Projects are stored in " + root.projectsPath + "."
             color: root.popupMuted
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -365,7 +615,7 @@ Panel {
         }
 
         Column {
-          visible: root.phase === "list"
+          visible: root.view === "list" && root.phase === "list"
           width: parent.width
           spacing: Style.spacing.lg
 
@@ -454,9 +704,10 @@ Panel {
                   spacing: Style.spacing.sm
 
                   Button {
+                    anchors.verticalCenter: parent.verticalCenter
                     text: "Start"
                     bordered: true
-                    enabled: !row.busy && root.busyProject === ""
+                    enabled: !root.anyBusy
                     foreground: root.popupText
                     fontFamily: root.fontFamily
                     fontSize: Style.font.caption
@@ -464,13 +715,38 @@ Panel {
                   }
 
                   Button {
+                    anchors.verticalCenter: parent.verticalCenter
                     text: "Stop"
                     bordered: true
-                    enabled: !row.busy && root.busyProject === ""
+                    enabled: !root.anyBusy
                     foreground: root.popupText
                     fontFamily: root.fontFamily
                     fontSize: Style.font.caption
                     onClicked: root.runAction("stop", row.name)
+                  }
+
+                  PanelActionButton {
+                    anchors.verticalCenter: parent.verticalCenter
+                    // U+F03EB, nf-md-pencil.
+                    iconText: "󰏫"
+                    tooltipText: "Edit " + row.name
+                    enabled: !root.anyBusy && root.pendingOpen === ""
+                    foreground: root.popupMuted
+                    hoverColor: root.popupText
+                    fontFamily: root.fontFamily
+                    onClicked: root.openForm(row.name)
+                  }
+
+                  PanelActionButton {
+                    anchors.verticalCenter: parent.verticalCenter
+                    // U+F01B4, nf-md-delete.
+                    iconText: "󰆴"
+                    tooltipText: "Remove " + row.name + " from the list"
+                    enabled: !root.anyBusy
+                    foreground: root.popupMuted
+                    hoverColor: Color.urgent
+                    fontFamily: root.fontFamily
+                    onClicked: root.confirmRemove = row.name
                   }
                 }
               }
@@ -518,6 +794,21 @@ Panel {
             }
           }
         }
+      }
+
+      // Removing only forgets the project; nothing running is touched, and
+      // the dialog says so.
+      ConfirmDialog {
+        anchors.fill: parent
+        z: 10
+        opened: root.confirmRemove !== ""
+        message: "Remove '" + root.confirmRemove + "' from omadev? Nothing running is stopped; only the configuration is deleted."
+        confirmText: "Remove"
+        background: Color.popups.background
+        foreground: root.popupText
+        fontFamily: root.fontFamily
+        onCanceled: root.confirmRemove = ""
+        onConfirmed: root.removeProject(root.confirmRemove)
       }
     }
   }

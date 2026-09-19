@@ -14,6 +14,9 @@ if sys.version_info < (3, 11):
 from pathlib import Path
 
 # The package sits one directory above this script; no installation step.
+# No .pyc files either: the plugin directory is a git checkout that the
+# shell watches, and stray __pycache__ writes would trigger reloads.
+sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from omadev_cli.cli import main  # noqa: E402  (import after sys.path fix)

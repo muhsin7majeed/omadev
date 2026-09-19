@@ -18,7 +18,7 @@ from typing import Any, Callable, TextIO
 
 from . import __version__
 from . import config as cfg
-from . import steps
+from . import forms, schema, steps
 
 EXIT_OK = 0
 EXIT_FAILURE = 1
@@ -86,6 +86,58 @@ def cmd_validate(args: argparse.Namespace) -> Result:
         "count": len(config.projects),
         "warnings": list(config.warnings),
     }, EXIT_OK
+
+
+def cmd_show(args: argparse.Namespace) -> Result:
+    """One project's full configuration, as the edit form needs it."""
+    config = cfg.load(args.file or cfg.projects_file(), check_paths=False)
+    project = _project_named(config, args.project)
+    return {"ok": True, "project": cfg.project_to_dict(project), "warnings": list(config.warnings)}, EXIT_OK
+
+
+def cmd_schema(args: argparse.Namespace) -> Result:
+    """The form description the widget renders."""
+    return {"ok": True, **schema.describe()}, EXIT_OK
+
+
+def _decode_project_argument(text: str) -> Any:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise CliError(f"project is not valid JSON (line {exc.lineno}, column {exc.colno})") from exc
+
+
+def cmd_add(args: argparse.Namespace) -> Result:
+    """Validate a project given as JSON and append it to the projects file."""
+    path = args.file or cfg.projects_file()
+    config = cfg.load(path, check_paths=False)
+    project, warnings = forms.project_from_form(_decode_project_argument(args.project_json))
+    updated = cfg.with_project(config, project)
+    cfg.save(updated, path)
+    log.info("add %s", project.name)
+    return {"ok": True, "project": cfg.project_to_dict(project), "warnings": list(config.warnings) + list(warnings)}, EXIT_OK
+
+
+def cmd_edit(args: argparse.Namespace) -> Result:
+    """Replace one project with a validated JSON version; renaming is allowed."""
+    path = args.file or cfg.projects_file()
+    config = cfg.load(path, check_paths=False)
+    _project_named(config, args.project)
+    project, warnings = forms.project_from_form(_decode_project_argument(args.project_json))
+    updated = cfg.with_project(config, project, replacing=args.project)
+    cfg.save(updated, path)
+    log.info("edit %s -> %s", args.project, project.name)
+    return {"ok": True, "project": cfg.project_to_dict(project), "warnings": list(config.warnings) + list(warnings)}, EXIT_OK
+
+
+def cmd_remove(args: argparse.Namespace) -> Result:
+    """Delete a project from the file. Nothing running is touched."""
+    path = args.file or cfg.projects_file()
+    config = cfg.load(path, check_paths=False)
+    _project_named(config, args.project)
+    cfg.save(cfg.without_project(config, args.project), path)
+    log.info("remove %s", args.project)
+    return {"ok": True, "removed": args.project, "warnings": list(config.warnings)}, EXIT_OK
 
 
 def cmd_status(args: argparse.Namespace) -> Result:
@@ -208,12 +260,31 @@ def _print_steps(result: dict[str, Any], out: TextIO) -> None:
         out.write(f"  {step['status']:<8} {step['step']:<{width}}  {step['detail']}\n")
 
 
+def _print_project(result: dict[str, Any], out: TextIO) -> None:
+    out.write(json.dumps(result["project"], indent=2, ensure_ascii=False) + "\n")
+
+
+def _print_removed(result: dict[str, Any], out: TextIO) -> None:
+    out.write(f"Removed project '{result['removed']}'\n")
+
+
+def _print_schema(result: dict[str, Any], out: TextIO) -> None:
+    for field in result["fields"]:
+        flag = "" if field.get("optional") else " (required)"
+        out.write(f"{field['key']:<14} {field['kind']:<8} {field['label']}{flag}\n")
+
+
 _TEXT_PRINTERS: dict[str, Callable[[dict[str, Any], TextIO], None]] = {
     "list": _print_list,
     "validate": _print_validate,
     "status": _print_status,
     "start": _print_steps,
     "stop": _print_steps,
+    "show": _print_project,
+    "add": _print_project,
+    "edit": _print_project,
+    "remove": _print_removed,
+    "schema": _print_schema,
 }
 
 
@@ -251,6 +322,26 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument("project", help="project name from the projects file")
     sub.add_argument("--dry-run", action="store_true", help="report what would happen without changing anything")
     sub.set_defaults(func=cmd_stop)
+
+    sub = subparsers.add_parser("show", parents=[common], help="print one project's full configuration")
+    sub.add_argument("project", help="project name from the projects file")
+    sub.set_defaults(func=cmd_show)
+
+    sub = subparsers.add_parser("add", parents=[common], help="add a project given as one JSON object")
+    sub.add_argument("project_json", metavar="JSON", help='e.g. \'{"name": "demo", "path": "~/dev/demo"}\'')
+    sub.set_defaults(func=cmd_add)
+
+    sub = subparsers.add_parser("edit", parents=[common], help="replace a project with the given JSON object")
+    sub.add_argument("project", help="current project name")
+    sub.add_argument("project_json", metavar="JSON", help="the complete new configuration")
+    sub.set_defaults(func=cmd_edit)
+
+    sub = subparsers.add_parser("remove", parents=[common], help="delete a project from the projects file")
+    sub.add_argument("project", help="project name from the projects file")
+    sub.set_defaults(func=cmd_remove)
+
+    sub = subparsers.add_parser("schema", parents=[common], help="describe the project fields the form renders")
+    sub.set_defaults(func=cmd_schema)
 
     return parser
 

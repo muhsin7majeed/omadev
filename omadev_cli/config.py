@@ -342,6 +342,37 @@ def _parse_project(raw: Any, where: str, warnings: list[str], *, check_paths: bo
     )
 
 
+def parse_project(data: Any, *, check_paths: bool = True) -> tuple[Project, tuple[str, ...]]:
+    """Validate one project on its own, as `add` and `edit` receive it.
+
+    Returns the project and any unknown-field warnings.
+    """
+    warnings: list[str] = []
+    project = _parse_project(data, "project", warnings, check_paths=check_paths)
+    return project, tuple(warnings)
+
+
+def with_project(config: Config, project: Project, *, replacing: str | None = None) -> Config:
+    """A copy of `config` with `project` added, or replacing the project named `replacing`."""
+    others = [p for p in config.projects if p.name != replacing]
+    if any(p.name == project.name for p in others):
+        raise ConfigError("project.name", f"a project named '{project.name}' already exists")
+    if replacing is not None and config.find(replacing) is None:
+        raise ConfigError("project", f"no project named '{replacing}'")
+    if replacing is None:
+        projects = tuple(others) + (project,)
+    else:
+        projects = tuple(project if p.name == replacing else p for p in config.projects)
+    return Config(version=config.version, default_browser=config.default_browser, projects=projects, warnings=config.warnings)
+
+
+def without_project(config: Config, name: str) -> Config:
+    if config.find(name) is None:
+        raise ConfigError("project", f"no project named '{name}'")
+    projects = tuple(p for p in config.projects if p.name != name)
+    return Config(version=config.version, default_browser=config.default_browser, projects=projects, warnings=config.warnings)
+
+
 def parse(data: Any, *, check_paths: bool = True) -> Config:
     """Turn decoded JSON into a Config, or raise ConfigError.
 
@@ -392,8 +423,8 @@ def load(path: Path | None = None, *, check_paths: bool = True) -> Config:
 # --------------------------------------------------------------------------- saving
 
 
-def to_dict(config: Config) -> dict[str, Any]:
-    """The JSON shape of a Config, omitting unset optional fields."""
+def project_to_dict(item: Project) -> dict[str, Any]:
+    """The JSON shape of one project, omitting unset optional fields."""
 
     def command(item: Command) -> dict[str, Any]:
         data: dict[str, Any] = {"name": item.name, "run": item.run}
@@ -412,35 +443,37 @@ def to_dict(config: Config) -> dict[str, Any]:
             data["match"] = item.match
         return data
 
-    def project(item: Project) -> dict[str, Any]:
-        data: dict[str, Any] = {
-            "name": item.name,
-            "path": str(item.path),
-            "multiplexer": item.multiplexer,
-            "mode": item.mode,
-        }
-        if item.wait_timeout != DEFAULT_WAIT_TIMEOUT:
-            data["wait_timeout"] = item.wait_timeout
-        if item.session is not None:
-            data["session"] = item.session
-        if item.commands:
-            data["commands"] = [command(c) for c in item.commands]
-        if item.url is not None:
-            data["url"] = item.url
-        if item.browser is not None:
-            data["browser"] = item.browser
-        if item.editor is not None:
-            data["editor"] = editor(item.editor)
-        if item.apps:
-            data["apps"] = [app(a) for a in item.apps]
-        if item.stop_commands:
-            data["stop_commands"] = list(item.stop_commands)
-        return data
+    data: dict[str, Any] = {
+        "name": item.name,
+        "path": str(item.path),
+        "multiplexer": item.multiplexer,
+        "mode": item.mode,
+    }
+    if item.wait_timeout != DEFAULT_WAIT_TIMEOUT:
+        data["wait_timeout"] = item.wait_timeout
+    if item.session is not None:
+        data["session"] = item.session
+    if item.commands:
+        data["commands"] = [command(c) for c in item.commands]
+    if item.url is not None:
+        data["url"] = item.url
+    if item.browser is not None:
+        data["browser"] = item.browser
+    if item.editor is not None:
+        data["editor"] = editor(item.editor)
+    if item.apps:
+        data["apps"] = [app(a) for a in item.apps]
+    if item.stop_commands:
+        data["stop_commands"] = list(item.stop_commands)
+    return data
 
+
+def to_dict(config: Config) -> dict[str, Any]:
+    """The JSON shape of a Config."""
     return {
         "version": config.version,
         "default_browser": config.default_browser,
-        "projects": [project(p) for p in config.projects],
+        "projects": [project_to_dict(p) for p in config.projects],
     }
 
 

@@ -46,10 +46,17 @@ usable from a terminal or keybinding without the widget.
 
 ```
 manifest.json          Omarchy plugin manifest (id: potato.omadev, kind: bar-widget)
-Widget.qml             bar icon + popup panel; calls the CLI, renders its JSON
+Widget.qml             bar icon + popup: project list with Start/Stop, and the form view
+components/
+  ProjectForm.qml      the add/edit form, rendered from the schema the CLI describes
+  ScalarField.qml      one labelled input: string, path, url, regex, argv, integer, enum
+  ObjectFields.qml     a group of scalar inputs with optional presets (the editor)
+  ListField.qml        repeated rows of scalars or scalar groups (commands, apps)
 bin/omadev             executable entry point (python3, no build step)
 omadev_cli/
   config.py            projects file: dataclasses, validation, atomic save
+  schema.py            the project form as data: fields, kinds, presets
+  forms.py             form input -> validator input (empty -> unset, "3000" -> 3000, argv split)
   system.py            Runner (subprocess without a shell, always a timeout), ports, /proc
   hypr.py              hyprctl clients, window matching, focus, pid -> window
   ports.py             who owns a listening port: process cwd via ss + /proc, or docker ps
@@ -72,11 +79,13 @@ Implemented:
 - `omadev start <project> [--dry-run] [--json]` — runs the start steps.
   `--dry-run` reads state but changes nothing; actions report `planned`.
 - `omadev stop <project> [--dry-run] [--json]` — runs the stop steps.
-
-Planned:
-
-- `omadev add|edit|remove <project> ...` — edits the projects file; the widget's
-  form calls these instead of writing JSON itself.
+- `omadev show <project> --json` — one project's full configuration.
+- `omadev add '<json>'`, `omadev edit <project> '<json>'`, `omadev remove <project>` —
+  change the projects file. The JSON is one project as the form submits it;
+  `forms.py` normalises it and `config.parse_project` validates it exactly as
+  the file is validated. Nothing is written when validation fails. `edit`
+  may rename. `remove` only forgets the project; nothing running is touched.
+- `omadev schema --json` — the form description the widget renders.
 
 Every step is **check, then act**, and reports one of `skipped`, `started`,
 `focused`, `stopped`, `planned`, `failed` with a short reason. Details are
@@ -177,15 +186,32 @@ Per project:
 `launch` and `match` strings may use `{path}` and `{name}`; substitution is
 plain replacement so regex braces survive.
 
-### The widget (`Widget.qml`)
+### The widget (`Widget.qml` and `components/`)
 
-- Extends `BarWidget` from `qs.Ui`; the popup uses the shell's `Panel`.
+- Extends the shell's `Panel`; the popup is a `KeyboardPanel`.
 - All colors and spacing come from `Color` and `Style` in `qs.Commons` and from
   the injected `bar` object. No hard-coded colors, fonts or pixel sizes, so
   every Omarchy theme applies automatically.
-- Shows three states: CLI missing (with the install hint), no projects (with
-  the add form), and the project list with Start/Stop and live step results.
-- The add/edit form collects the fields above and calls `omadev add`/`edit`.
+- Two views. **List**: loading, error, empty, or the project rows with a state
+  dot, a summary from `omadev status --json`, Start/Stop, edit and remove.
+  **Form**: add or edit one project.
+- The form is **schema-driven**. `omadev schema --json` is fetched once per
+  popup session; `ProjectForm` renders a field per entry by kind. To add a
+  project field: add it to `config.py` (validation) and `schema.py` (form),
+  and `tests/test_forms.py` fails until both agree. No QML change is needed
+  unless a new *kind* is introduced.
+- The form owns its draft as one object and reassigns it on every change
+  (bindings re-evaluate on assignment, not mutation). List rows are driven by
+  the row count, not the array, so typing never rebuilds a row or loses focus.
+- Save hands the draft to `omadev add`/`edit` untouched. An error comes back
+  with `where`, which is mapped to the top-level field and shown in the
+  theme's urgent colour next to that field.
+- Remove asks through the shell's `ConfirmDialog` and says that nothing
+  running is stopped.
+- Text from data is rendered with `Text.PlainText`, so a project name can
+  never inject rich text.
+- A second `IpcHandler` on `potato.omadev.dev` (`newProject`, `editProject <name>`)
+  opens the form from a terminal, for checking the QML without clicking.
 
 ### Idle behaviour
 
@@ -251,6 +277,16 @@ processes. Add a test for every new step or check.
 
 The plugin directory must not contain symlinks (the validator rejects them),
 so development copies files in rather than linking the repo.
+
+The widget logs `potato.omadev: widget loaded` once per load. If that line
+does not appear after `scripts/dev-install` (check with
+`quickshell log -p $OMARCHY_PATH/shell`), the shell's hot reload has stalled;
+`omarchy restart shell` loads the current code. Seen once when many files
+changed at once while the popup was open. Component load failures are
+logged as `Plugin widget potato.omadev failed: …`.
+
+To look at the form without clicking: `omarchy-shell potato.omadev.dev newProject`
+or `omarchy-shell potato.omadev.dev editProject kadha`.
 
 ## Decisions log
 

@@ -53,6 +53,13 @@ class ClientsTests(unittest.TestCase):
             hypr.focus(runner, window(address="0xa"))
         self.assertEqual(len(runner.calls), 2)
 
+    def test_odd_window_address_is_refused_before_dispatch(self) -> None:
+        runner = FakeRunner().on("hyprctl", "dispatch", stdout="ok\n")
+        for address in ('0x1" }); os.exit(', "", "12", "0xZZ"):
+            with self.subTest(address=address), self.assertRaises(hypr.HyprError):
+                hypr.focus(runner, window(address=address))
+        self.assertEqual(runner.calls, [])
+
     def test_close_dispatch_forms(self) -> None:
         runner = FakeRunner().on("hyprctl", "dispatch", stdout="ok\n")
         hypr.close(runner, window(address="0xb"))

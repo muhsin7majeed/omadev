@@ -53,16 +53,31 @@ class HttpTests(unittest.TestCase):
             def log_message(self, *args: object) -> None:
                 pass
 
-        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
-        port = server.server_address[1]
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            # An error status still counts: the app is answering.
-            self.assertTrue(system.http_ok(f"http://127.0.0.1:{port}/"))
-        finally:
-            server.shutdown()
-            server.server_close()
+        hits = {"n": 0}
+
+        class Redirecting(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                hits["n"] += 1
+                self.send_response(302)
+                self.send_header("Location", "http://example.invalid/never-fetched")
+                self.end_headers()
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        for handler in (Handler, Redirecting):
+            server = http.server.HTTPServer(("127.0.0.1", 0), handler)
+            port = server.server_address[1]
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                # An error status still counts: the app is answering. So does
+                # a redirect, which is answered without being followed.
+                self.assertTrue(system.http_ok(f"http://127.0.0.1:{port}/"))
+            finally:
+                server.shutdown()
+                server.server_close()
+        self.assertEqual(hits["n"], 1, "the redirect target was not fetched")
 
         # A bare listening socket that never speaks HTTP is not "responding".
         with socket.socket() as listener:

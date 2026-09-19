@@ -12,6 +12,7 @@ import argparse
 import json
 import logging
 import logging.handlers
+import os
 import sys
 from pathlib import Path
 from typing import Any, Callable, TextIO
@@ -370,7 +371,13 @@ def configure_logging(err: TextIO) -> None:
     try:
         directory = cfg.state_dir()
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        handler = logging.handlers.RotatingFileHandler(directory / "omadev.log", maxBytes=LOG_BYTES, backupCount=LOG_BACKUPS, encoding="utf-8")
+        path = directory / "omadev.log"
+        # The log names project folders and commands; keep it to the owner.
+        # Created here with 0600 before the handler opens it, since the
+        # handler would otherwise follow the umask. Rotated copies inherit.
+        os.close(os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600))
+        os.chmod(path, 0o600)
+        handler = logging.handlers.RotatingFileHandler(path, maxBytes=LOG_BYTES, backupCount=LOG_BACKUPS, encoding="utf-8")
     except OSError as exc:
         err.write(f"warning: logging disabled ({exc})\n")
         log.addHandler(logging.NullHandler())

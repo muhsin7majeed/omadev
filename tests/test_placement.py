@@ -102,11 +102,11 @@ class PlacementTests(unittest.TestCase):
                          commands=[{"name": "app", "run": "docker compose up", "port": 3000}])
 
         # Nothing open: the editor is launched, its window appears, it is moved.
-        self.appear_on_launch("zed", window(address="0xz", cls="dev.zed.Zed", title="kadha — x"))
+        self.appear_on_launch("zed", window(address="0xe1", cls="dev.zed.Zed", title="kadha — x"))
         results = self.start(config)
         self.assertEqual(results["editor"].status, steps.STARTED)
         self.assertIn("moved to workspace 3", results["editor"].detail)
-        self.assertEqual(self.moves(), ['hl.dsp.window.move({ window = "address:0xz", workspace = 3, silent = true })'])
+        self.assertEqual(self.moves(), ['hl.dsp.window.move({ window = "address:0xe1", workspace = 3, silent = true })'])
 
         # Already open on another workspace: focused there, never moved.
         self.runner.calls.clear()
@@ -137,8 +137,8 @@ class PlacementTests(unittest.TestCase):
         config = project(self.path, url="http://localhost:3000", browser="webapp",
                          workspaces={"browser": 1},
                          apps=[{"name": "ld", "launch": ["omarchy-launch-tui", "lazydocker"], "match": "lazydocker", "workspace": 4}])
-        self.appear_on_launch("omarchy-launch-webapp", window(address="0xw", cls="brave-localhost__-Default", title="Kadha"))
-        self.appear_on_launch("lazydocker", window(address="0xl", cls="org.omarchy.lazydocker", title="lazydocker"))
+        self.appear_on_launch("omarchy-launch-webapp", window(address="0xe3", cls="brave-localhost__-Default", title="Kadha"))
+        self.appear_on_launch("lazydocker", window(address="0xe4", cls="org.omarchy.lazydocker", title="lazydocker"))
         results = self.start(config)
         self.assertIn("moved to workspace 1", results["browser"].detail)
         self.assertIn("moved to workspace 4", results["app:ld"].detail)
@@ -168,7 +168,7 @@ class PlacementTests(unittest.TestCase):
 
         def hook(argv: tuple[str, ...]) -> None:
             if argv[:2] == ("omarchy-launch-terminal", "herdr"):
-                self.fake.windows.append(window(address="0xt", cls="com.mitchellh.ghostty", pid=50))
+                self.fake.windows.append(window(address="0xe5", cls="com.mitchellh.ghostty", pid=50))
                 self.fake.processes.append((100, ["herdr"]))
 
         self.runner.detach_hooks.append(hook)
@@ -176,7 +176,7 @@ class PlacementTests(unittest.TestCase):
         results = self.start(config)
         self.assertEqual(results["terminal"].status, steps.STARTED)
         self.assertIn("moved to workspace 2", results["terminal"].detail)
-        self.assertEqual(self.moves(), ['hl.dsp.window.move({ window = "address:0xt", workspace = 2, silent = true })'])
+        self.assertEqual(self.moves(), ['hl.dsp.window.move({ window = "address:0xe5", workspace = 2, silent = true })'])
 
 
 class SetupTests(unittest.TestCase):
@@ -302,7 +302,7 @@ class NoneModeTests(unittest.TestCase):
     def test_process_gets_its_own_terminal_window(self) -> None:
         cls = hypr.app_id("My Proj", "web")
         self.assertEqual(cls, "omadev.my-proj.web")
-        self.runner.detach_hooks.append(lambda argv: self.fake.windows.append(window(address="0xn", cls=cls, title="npm")) if "omarchy-launch-tui" in argv else None)
+        self.runner.detach_hooks.append(lambda argv: self.fake.windows.append(window(address="0xe2", cls=cls, title="npm")) if "omarchy-launch-tui" in argv else None)
         results = by_step(steps.start(self.config.projects[0], self.config, self.fake.build()))
         self.assertEqual(results["workspace"].status, steps.SKIPPED)
         self.assertEqual(results["terminal"].status, steps.SKIPPED)
@@ -321,7 +321,7 @@ class NoneModeTests(unittest.TestCase):
 
     def test_stop_closes_the_terminal_window_and_waits_for_the_port(self) -> None:
         cls = hypr.app_id("My Proj", "web")
-        self.fake.windows.append(window(address="0xn", cls=cls, title="npm"))
+        self.fake.windows.append(window(address="0xe2", cls=cls, title="npm"))
         self.fake.open_ports = {5173}
 
         def closed(argv: tuple[str, ...]) -> CommandResult | None:
@@ -333,11 +333,11 @@ class NoneModeTests(unittest.TestCase):
         self.runner.respond_with(closed)
         results = by_step(steps.stop(self.config.projects[0], self.config, self.fake.build()))
         self.assertEqual(results["command:web"].status, steps.STOPPED)
-        self.assertIn('hl.dsp.window.close({ window = "address:0xn" })', [c[2] for c in self.runner.calls if c[:2] == ("hyprctl", "dispatch")])
+        self.assertIn('hl.dsp.window.close({ window = "address:0xe2" })', [c[2] for c in self.runner.calls if c[:2] == ("hyprctl", "dispatch")])
 
     def test_status_reports_the_window_as_listening(self) -> None:
         cls = hypr.app_id("My Proj", "web")
-        self.fake.windows.append(window(address="0xn", cls=cls, title="npm"))
+        self.fake.windows.append(window(address="0xe2", cls=cls, title="npm"))
         self.fake.open_ports = {5173}
         self.fake.listeners[5173] = ports.Listener(9, "node", self.path)
         snapshot = steps.status(self.config.projects[0], self.config, self.fake.build())

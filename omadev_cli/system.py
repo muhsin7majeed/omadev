@@ -115,16 +115,32 @@ def port_open(host: str, port: int, timeout: float = PROBE_TIMEOUT) -> bool:
         return False
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Treat a redirect as an answer instead of following it.
+
+    A dev server may redirect to a login page or, misconfigured, to an
+    external site; the readiness check must never fetch beyond the URL it
+    was given.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401 (urllib signature)
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirect)
+
+
 def http_ok(url: str, timeout: float = HTTP_TIMEOUT) -> bool:
     """True if the URL answers HTTP at all, whatever the status code.
 
     A TCP connect is not enough for docker projects: the proxy binds the
     port the moment the container starts, long before the app inside can
-    answer. Any HTTP response, error statuses included, means the app is up.
+    answer. Any HTTP response, error statuses and redirects included, means
+    the app is up. Redirects are not followed.
     """
     request = urllib.request.Request(url, method="GET", headers={"User-Agent": "omadev"})
     try:
-        with urllib.request.urlopen(request, timeout=timeout):
+        with _opener.open(request, timeout=timeout):
             return True
     except urllib.error.HTTPError:
         return True

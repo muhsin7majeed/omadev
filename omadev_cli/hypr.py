@@ -95,6 +95,20 @@ def first(windows: Iterable[Window], predicate) -> Window | None:
     return None
 
 
+_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{1,16}$")
+
+
+def _address(window: Window) -> str:
+    """The window's address as a dispatcher argument.
+
+    Addresses come from hyprctl and are always hex, but they are spliced
+    into a Lua string, so anything else is refused rather than passed on.
+    """
+    if not _ADDRESS.match(window.address):
+        raise HyprError(f"unexpected window address {window.address!r}")
+    return f"address:{window.address}"
+
+
 def _dispatch(runner: Runner, lua: str, classic: list[str], what: str) -> None:
     """Run a dispatcher the way Omarchy's scripts do: the Lua form first,
     because Hyprland with a Lua config rejects the classic syntax, then the
@@ -109,12 +123,12 @@ def _dispatch(runner: Runner, lua: str, classic: list[str], what: str) -> None:
 
 
 def focus(runner: Runner, window: Window) -> None:
-    address = f"address:{window.address}"
+    address = _address(window)
     _dispatch(runner, f'hl.dsp.focus({{ window = "{address}" }})', ["focuswindow", address], f"focus {window.label}")
 
 
 def close(runner: Runner, window: Window) -> None:
-    address = f"address:{window.address}"
+    address = _address(window)
     # Window dispatchers live under hl.dsp.window in Hyprland's Lua API;
     # focus is the exception and sits at the top level.
     _dispatch(runner, f'hl.dsp.window.close({{ window = "{address}" }})', ["closewindow", address], f"close {window.label}")
@@ -122,7 +136,7 @@ def close(runner: Runner, window: Window) -> None:
 
 def move_to_workspace(runner: Runner, window: Window, workspace: int) -> None:
     """Move a window to a workspace without switching to it."""
-    address = f"address:{window.address}"
+    address = _address(window)
     _dispatch(
         runner,
         f'hl.dsp.window.move({{ window = "{address}", workspace = {int(workspace)}, silent = true }})',

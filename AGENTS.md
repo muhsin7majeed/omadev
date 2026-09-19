@@ -269,6 +269,40 @@ widget must cost nothing while nobody is looking at it.
 - Errors surface to the user in the popup with the failing step and reason.
   Logs go to `~/.local/state/omadev/omadev.log`, rotated by size.
 
+## Security review (2026-09-19)
+
+Reviewed: every subprocess call, every place external text is spliced into
+a command or a Lua expression, file permissions, network access, and what
+the widget does while idle.
+
+- **No shell.** All subprocesses are argv lists with timeouts. The only
+  places a user-written command string is executed are the user's own
+  multiplexer pane (`herdr pane run`, `tmux send-keys -l`) and, in `none`
+  mode, `bash -lc` inside a terminal window omadev opens. `stop_commands`
+  are split with `shlex` and run without a shell.
+- **Lua dispatch strings** take exactly two interpolated values: a window
+  address, refused unless it matches `^0x[0-9a-fA-F]{1,16}$`, and a
+  workspace number cast with `int()`.
+- **Files**: `~/.config/omadev/` and `~/.local/state/omadev/` are 0700, the
+  projects file and the log are 0600 (the log names folders and commands).
+  Saves are atomic. Nothing else is written; `/usr/share/omarchy` is never
+  touched. No bytecode is written into the watched plugin directory.
+- **Network**: only the readiness probe, a GET of the configured URL with a
+  2s timeout that does not follow redirects, and TCP connects to localhost.
+- **Text from data** is rendered with `Text.PlainText` in every QML label.
+- **Idle cost**: no `Timer` anywhere. The widget holds one inotify watch on
+  the projects file and runs a process only on open, on click, or on a file
+  change; with the popup closed no omadev process exists. Tooltips are
+  created on hover and destroyed after, not one popup per field.
+- **Memory**: per-popup state (`actionResults`, form draft, schema) is
+  dropped on close; status lists are small and replaced whole, never appended.
+- **Local IPC** (`potato.omadev`, `potato.omadev.dev`) is reachable by any
+  process of the same user, like every Omarchy shell target; it can open the
+  popup or the form, nothing more.
+
+Known, accepted: regular expressions in `match` come from the user's own
+file and are tested against their own window titles (no untrusted input).
+
 ## Distribution
 
 Hassle-free install is a requirement, which is why the CLI is a Python script

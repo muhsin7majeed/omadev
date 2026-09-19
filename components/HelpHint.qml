@@ -34,38 +34,52 @@ Item {
     cursorShape: Qt.WhatsThisCursor
   }
 
-  // The popup takes its width from the content's implicit width, which for
-  // a Text is the unwrapped line. So the width is decided here, from the
-  // measured text, and the Text is told to wrap inside it.
-  TextMetrics {
-    id: metrics
-    font.family: hint.fontFamily
-    font.pixelSize: tip.fontSize
-    text: hint.text
+  // The tooltip exists only while hovered. A form has dozens of hints, and
+  // a popup window per hint sitting idle would be dozens of popup windows.
+  Loader {
+    active: hover.hovered && hint.text !== ""
+    sourceComponent: tooltip
   }
 
-  PanelToolTip {
-    id: tip
-    visible: hover.hovered && hint.text !== ""
-    text: hint.text
-    fontFamily: hint.fontFamily
-    delay: 250
+  Component {
+    id: tooltip
 
-    readonly property real horizontalInset: Border.left(panelBorderSpec) + Border.right(panelBorderSpec) + Style.spacing.controlPaddingX * 2
-    contentWidth: Math.min(Math.ceil(metrics.advanceWidth) + horizontalInset, hint.maxWidth)
+    Item {
+      // The popup takes its width from the content's implicit width, which
+      // for a Text is the unwrapped line. So the width is decided here, from
+      // the measured text, and the Text is told to wrap inside it.
+      TextMetrics {
+        id: metrics
+        font.family: hint.fontFamily
+        font.pixelSize: tip.fontSize
+        text: hint.text
+      }
 
-    contentItem: Text {
-      textFormat: Text.PlainText
-      text: tip.text
-      wrapMode: Text.Wrap
-      width: tip.contentWidth
-      color: tip.panelForeground
-      font.family: tip.fontFamily
-      font.pixelSize: tip.fontSize
-      leftPadding: Border.left(tip.panelBorderSpec) + Style.spacing.controlPaddingX
-      rightPadding: Border.right(tip.panelBorderSpec) + Style.spacing.controlPaddingX
-      topPadding: Border.top(tip.panelBorderSpec) + Style.spacing.controlPaddingY
-      bottomPadding: Border.bottom(tip.panelBorderSpec) + Style.spacing.controlPaddingY
+      PanelToolTip {
+        id: tip
+        parent: hint
+        visible: true
+        text: hint.text
+        fontFamily: hint.fontFamily
+        delay: 250
+
+        readonly property real horizontalInset: Border.left(panelBorderSpec) + Border.right(panelBorderSpec) + Style.spacing.controlPaddingX * 2
+        contentWidth: Math.min(Math.ceil(metrics.advanceWidth) + horizontalInset, hint.maxWidth)
+
+        contentItem: Text {
+          textFormat: Text.PlainText
+          text: tip.text
+          wrapMode: Text.Wrap
+          width: tip.contentWidth
+          color: tip.panelForeground
+          font.family: tip.fontFamily
+          font.pixelSize: tip.fontSize
+          leftPadding: Border.left(tip.panelBorderSpec) + Style.spacing.controlPaddingX
+          rightPadding: Border.right(tip.panelBorderSpec) + Style.spacing.controlPaddingX
+          topPadding: Border.top(tip.panelBorderSpec) + Style.spacing.controlPaddingY
+          bottomPadding: Border.bottom(tip.panelBorderSpec) + Style.spacing.controlPaddingY
+        }
+      }
     }
   }
 }
